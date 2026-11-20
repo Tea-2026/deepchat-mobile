@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# macOS / Windows noise
+.DS_Store
+Thumbs.db
+
+# Tooling output
+.out/
+_lead/
+docs/ui-v2-shots/
+*.log

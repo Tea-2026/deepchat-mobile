@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Photo grid in the attachment panel (docs/ui-spec-v2.md §5).
+      Android 13+ replaced READ_EXTERNAL_STORAGE with per-media-type grants.
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <application>
+
+        <!--
+          Camera capture writes exactly one temporary file and hands the camera
+          app a content:// URI for it. CAMERA permission is deliberately NOT
+          declared: declaring it would make ACTION_IMAGE_CAPTURE require a
+          runtime grant for no benefit.
+
+          The authority is a literal, not "${applicationId}.ui.fileprovider":
+          a library manifest expands ${applicationId} to the *library*
+          namespace, which only happens to match the app's applicationId today.
+          A literal keeps this file and ChatScreen in lockstep.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.deepseek.mobilechat.ui.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ui_file_paths" />
+        </provider>
+    </application>
+</manifest>

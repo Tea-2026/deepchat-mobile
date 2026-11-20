@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="generation_channel_name">Background generation</string>
+    <string name="generation_channel_description">Shown while a reply is being generated in the background</string>
+    <string name="generation_notification_text">Mobile Chat is generating a reply in the background.</string>
+    <string name="generation_notification_fallback_title">Generating reply…</string>
+    <string name="generation_cancel_action">Cancel</string>
+</resources>

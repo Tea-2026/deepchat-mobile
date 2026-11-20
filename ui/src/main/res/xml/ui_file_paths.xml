@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths exposed through the UI's FileProvider.
+  Only the camera hand-off directory is shared: one photo at a time, written by
+  the camera app and read back by the attachment importer.
+-->
+<paths>
+    <cache-path
+        name="camera"
+        path="camera/" />
+</paths>

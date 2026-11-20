@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.MobileChat" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Without this the window paints white for a frame or two before
+             Compose draws, which reads as a white flash on launch and when
+             navigating into Settings. Day/night variants live in
+             values/colors.xml and values-night/colors.xml. -->
+        <item name="android:windowBackground">@color/app_window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

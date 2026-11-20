@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shown by the window before the first Compose frame, and behind
+         predictive-back / activity transitions. Matches the app surface so
+         there is no white flash on launch or on cold-start navigation. -->
+    <color name="app_window_background">#FFFFFFFF</color>
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+</resources>
