@@ -80,4 +80,29 @@ class PriceBookTest {
         // A CNY price must never be converted twice.
         assertEquals(1.0, Fx.toCny(1.0, Currency.CNY), 1e-9)
     }
+
+    @Test
+    fun `priceUsage attaches a CNY cost to a real deepseek usage`() {
+        // Peak, 1M prompt of which 800k cached, 1M completion:
+        // 200k*¥2 + 800k*¥0.04 + 1M*¥8 = ¥0.4 + ¥0.032 + ¥8 = ¥8.432
+        val usage = com.deepseek.mobilechat.domain.Usage(
+            promptTokens = 1_000_000,
+            cachedPromptTokens = 800_000,
+            completionTokens = 1_000_000,
+        )
+
+        val priced = PriceBook.priceUsage("deepseek-flash", usage, beijing(day = 23, hour = 10))
+
+        assertEquals(8.432, priced.cost!!, 1e-9)
+        assertEquals(usage.promptTokens, priced.promptTokens)
+    }
+
+    @Test
+    fun `priceUsage leaves an unknown model unpriced`() {
+        val usage = com.deepseek.mobilechat.domain.Usage(promptTokens = 10, completionTokens = 5)
+
+        val priced = PriceBook.priceUsage("some-unknown-model", usage, beijing(day = 23, hour = 10))
+
+        org.junit.Assert.assertNull(priced.cost)
+    }
 }

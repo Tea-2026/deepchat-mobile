@@ -223,7 +223,16 @@ internal class LogTurnRunner(
                         parentId = parentId,
                         parts = parts,
                         modelInfo = modelInfo,
-                        usage = usage,
+                        // The engine owns the money too: price the turn before it
+                        // is written, so a message can never be stored without a
+                        // cost while usage is known.
+                        usage = usage?.let {
+                            com.deepseek.mobilechat.application.pricing.PriceBook.priceUsage(
+                                modelId = modelInfo.ref.modelId.raw,
+                                usage = it,
+                                atMillis = now,
+                            )
+                        },
                         finishReason = finishReason,
                         citations = citations,
                     ),

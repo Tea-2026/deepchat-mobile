@@ -108,6 +108,27 @@ object PriceBook {
     }
 
     /**
+     * Attaches an estimated CNY cost to [usage] for [modelId] at [atMillis].
+     *
+     * Returns the usage unchanged when the book does not know the model: a
+     * missing price must stay `null`, never become a confident ¥0.
+     */
+    fun priceUsage(
+        modelId: String,
+        usage: com.deepseek.mobilechat.domain.Usage,
+        atMillis: Long,
+    ): com.deepseek.mobilechat.domain.Usage {
+        val pricing = lookup(modelId, atMillis) ?: return usage
+        val cached = usage.cachedPromptTokens.coerceIn(0, usage.promptTokens)
+        val fresh = usage.promptTokens - cached
+        val cachedRate = pricing.cachedInputPerMTok ?: pricing.inputPerMTok
+        val raw = fresh * pricing.inputPerMTok +
+            cached * cachedRate +
+            usage.completionTokens * pricing.outputPerMTok
+        return usage.copy(cost = Fx.toCny(raw / 1_000_000.0, pricing.currency))
+    }
+
+    /**
      * DeepSeek's peak window: Beijing time, Monday–Friday, 09:00–12:00 and
      * 14:00–18:00, excluding Chinese public holidays (holidays are not modelled
      * — a holiday is billed at the cheaper idle rate, so treating it as peak
