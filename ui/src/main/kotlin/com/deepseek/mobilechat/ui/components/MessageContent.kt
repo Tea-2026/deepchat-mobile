@@ -74,6 +74,9 @@ fun MessageContent(
     val fileParts = remember(message.parts) {
         message.parts.filterIsInstance<MessagePart.FileRef>()
     }
+    val searchResults = remember(message.parts) {
+        message.parts.filterIsInstance<MessagePart.SearchResults>()
+    }
     val textColor = when (message.role) {
         MessageRole.USER -> chatColors.userBubbleText
         else -> chatColors.assistantBubbleText
@@ -99,15 +102,27 @@ fun MessageContent(
             streaming -> TypingDots(modifier = Modifier.padding(vertical = Spacing.xxs))
         }
 
-        if (imageParts.isNotEmpty()) {
-            Column(
+        // Search provenance is recorded on the user message (that is where the
+        // search was triggered) and expands in place below the text.
+        if (searchResults.isNotEmpty()) {
+            SearchSourcesPanel(
+                results = searchResults,
+                onUserBubble = message.role == MessageRole.USER,
                 modifier = Modifier.padding(top = if (body.isEmpty()) Spacing.xxs else Spacing.sm),
-                verticalArrangement = Arrangement.spacedBy(Spacing.xs),
-            ) {
-                imageParts.forEach { part ->
-                    MessageAttachmentImage(attachmentId = part.attachmentId)
-                }
-            }
+            )
+        }
+
+        if (imageParts.isNotEmpty()) {
+            MessageAttachmentStrip(
+                attachmentIds = imageParts.map { it.attachmentId },
+                modifier = Modifier.padding(
+                    top = if (body.isEmpty() && searchResults.isEmpty()) {
+                        Spacing.xxs
+                    } else {
+                        Spacing.sm
+                    },
+                ),
+            )
         }
 
         if (fileParts.isNotEmpty()) {
@@ -133,7 +148,49 @@ fun MessageContent(
     }
 }
 
-/** Assistant-only footer: error with retry, or truncation with continue. */
+/** How an assistant turn's terminal footer should present itself. */
+internal enum class MessageFooterMode { NONE, TRUNCATED, INTERRUPTED, FAILED }
+
+internal data class MessageFooterState(
+    val mode: MessageFooterMode,
+    val canContinue: Boolean,
+    val canRetry: Boolean,
+) {
+    val visible: Boolean get() = mode != MessageFooterMode.NONE
+}
+
+/**
+ * Pure decision used by [MessageStatusFooter] (and its JVM test).
+ *
+ * A turn can be continued after a LENGTH truncation or after it ends
+ * cancelled/failed: `ChatService.continueGeneration` accepts exactly those
+ * terminal states, and the adapter history repair keeps an interrupted
+ * placeholder out of the next request. A natural COMPLETE/STOP reply still has
+ * no footer.
+ */
+internal fun messageFooterState(message: Message): MessageFooterState {
+    val failed = message.status == MessageStatus.FAILED ||
+        message.finishReason == FinishReason.ERROR
+    val interrupted = message.status == MessageStatus.CANCELLED
+    val truncated = message.status == MessageStatus.COMPLETE &&
+        message.finishReason == FinishReason.LENGTH
+    return when {
+        failed -> MessageFooterState(MessageFooterMode.FAILED, canContinue = true, canRetry = true)
+        interrupted -> MessageFooterState(
+            MessageFooterMode.INTERRUPTED,
+            canContinue = true,
+            canRetry = false,
+        )
+        truncated -> MessageFooterState(
+            MessageFooterMode.TRUNCATED,
+            canContinue = true,
+            canRetry = false,
+        )
+        else -> MessageFooterState(MessageFooterMode.NONE, canContinue = false, canRetry = false)
+    }
+}
+
+/** Assistant-only footer: error with retry/continue, or interruption/truncation with continue. */
 @Composable
 fun MessageStatusFooter(
     message: Message,
@@ -143,18 +200,17 @@ fun MessageStatusFooter(
 ) {
     val chatColors = LocalChatColors.current
     val errorColor = MaterialTheme.colorScheme.error
-    val failed = message.status == MessageStatus.FAILED
-    val truncated = message.status == MessageStatus.COMPLETE &&
-        message.finishReason == FinishReason.LENGTH
+    val state = messageFooterState(message)
     MotionVisibility(
-        visible = failed || truncated,
+        visible = state.visible,
         modifier = modifier,
         enter = Motion.enter(),
         exit = Motion.exit(),
         label = "messageStatus",
     ) {
-        if (failed) {
-            Row(
+        when (state.mode) {
+            MessageFooterMode.NONE -> Unit
+            MessageFooterMode.FAILED -> Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
             ) {
@@ -174,9 +230,35 @@ fun MessageStatusFooter(
                 TextButton(onClick = onRetry) {
                     Text("重试", style = MaterialTheme.typography.labelLarge)
                 }
+                if (state.canContinue) {
+                    TextButton(onClick = onContinue) {
+                        Text("继续生成", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
             }
-        } else if (truncated) {
-            Row(
+
+            MessageFooterMode.INTERRUPTED -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+            ) {
+                Text(
+                    // Process-death reconciliation stores an explicit reason;
+                    // a user-initiated stop has no error and keeps the old copy.
+                    text = message.error?.takeIf { it.isNotBlank() } ?: "已停止生成",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = chatColors.mutedText,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (state.canContinue) {
+                    TextButton(onClick = onContinue) {
+                        Text("继续生成", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+
+            MessageFooterMode.TRUNCATED -> Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
             ) {

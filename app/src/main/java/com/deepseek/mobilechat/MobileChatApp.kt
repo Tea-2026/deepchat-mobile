@@ -11,5 +11,8 @@ class MobileChatApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // A previous process may have died mid-stream: settle those rows before
+        // the user can interact with them (runs off the main thread).
+        container.reconcileStalledGenerations()
     }
 }

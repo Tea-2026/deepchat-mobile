@@ -106,7 +106,25 @@ data class SamplingParams(
     val stop: List<String> = emptyList(),
 )
 
-data class ModelPricing(val inputPerMTokUsd: Double, val outputPerMTokUsd: Double)
+/** Money unit a price is quoted in. The app displays everything in CNY. */
+enum class Currency(val symbol: String) {
+    USD("$"),
+    CNY("¥"),
+}
+
+/**
+ * Per-1M-token prices, quoted in [currency].
+ *
+ * [cachedInputPerMTok] is the discounted price for prompt tokens the provider
+ * served from its context cache (DeepSeek bills those at ~1/50 of a miss).
+ * `null` means "this provider does not price cache hits separately".
+ */
+data class ModelPricing(
+    val inputPerMTok: Double,
+    val outputPerMTok: Double,
+    val cachedInputPerMTok: Double? = null,
+    val currency: Currency = Currency.USD,
+)
 
 data class ModelCapabilities(
     val vision: Boolean = false,
@@ -134,7 +152,14 @@ data class Usage(
     val promptTokens: Int = 0,
     val completionTokens: Int = 0,
     val reasoningTokens: Int = 0,
-    val costUsd: Double? = null,
+    /**
+     * The slice of [promptTokens] the provider served from its cache. Billed at
+     * the discounted cache-hit price, so it must be tracked separately or every
+     * long conversation looks more expensive than it is.
+     */
+    val cachedPromptTokens: Int = 0,
+    /** Estimated cost in **CNY**, written once when the message completes. */
+    val cost: Double? = null,
 )
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 package com.deepseek.mobilechat.data.local
 
+import com.deepseek.mobilechat.data.local.db.Db
 import com.deepseek.mobilechat.data.local.db.DbException
 import com.deepseek.mobilechat.domain.ConversationId
 import com.deepseek.mobilechat.domain.FinishReason
@@ -52,7 +53,7 @@ class MessageStoreTest {
                 pinned = true,
             ).copy(
                 modelInfo = modelInfo,
-                usage = Usage(promptTokens = 10, completionTokens = 20, reasoningTokens = 3, costUsd = 0.001),
+                usage = Usage(promptTokens = 10, completionTokens = 20, reasoningTokens = 3, cost = 0.001),
                 finishReason = FinishReason.STOP,
             )
 
@@ -166,4 +167,99 @@ class MessageStoreTest {
             assertEquals(2, next.await().size)
         }
     }
+
+    @Test
+    fun appendWritesTheDenormalisedUsageAndModelColumns() = runBlocking {
+        TestEnv().use { env ->
+            env.conversations.upsert(conversation("c1"))
+            env.messages.append(
+                message("m1", "c1", role = MessageRole.ASSISTANT).copy(
+                    modelInfo = modelInfo(providerId = "prov-a", modelId = "model-a"),
+                    usage = Usage(
+                        promptTokens = 11,
+                        completionTokens = 7,
+                        reasoningTokens = 2,
+                        cachedPromptTokens = 3,
+                        cost = 0.25,
+                    ),
+                ),
+            )
+
+            assertEquals(
+                listOf<Any?>(11L, 3L, 7L, 0.25, "model-a", "prov-a"),
+                env.db.denormalisedUsage("m1"),
+            )
+        }
+    }
+
+    @Test
+    fun appendingAMessageWithoutUsageLeavesTheDenormalisedColumnsNull() = runBlocking {
+        TestEnv().use { env ->
+            env.conversations.upsert(conversation("c1"))
+            env.messages.append(message("m1", "c1", role = MessageRole.USER))
+
+            assertEquals(
+                listOf<Any?>(null, null, null, null, null, null),
+                env.db.denormalisedUsage("m1"),
+            )
+        }
+    }
+
+    @Test
+    fun streamingCheckpointUpdateRewritesTheDenormalisedUsageColumns() = runBlocking {
+        TestEnv().use { env ->
+            env.conversations.upsert(conversation("c1"))
+            env.messages.append(message("m1", "c1", status = MessageStatus.STREAMING))
+            assertEquals(
+                listOf<Any?>(null, null, null, null, null, null),
+                env.db.denormalisedUsage("m1"),
+            )
+
+            // A checkpoint is an `update` on the streaming message with the
+            // usage reported so far.
+            env.messages.update(
+                env.messages.get(MessageId("m1"))!!.copy(
+                    modelInfo = modelInfo(providerId = "prov-a", modelId = "model-a"),
+                    usage = Usage(promptTokens = 5, completionTokens = 2, cachedPromptTokens = 1, cost = 0.01),
+                ),
+            )
+            assertEquals(
+                listOf<Any?>(5L, 1L, 2L, 0.01, "model-a", "prov-a"),
+                env.db.denormalisedUsage("m1"),
+            )
+
+            // A later checkpoint replaces the numbers instead of adding to
+            // them: the columns mirror the latest Usage, not a running sum.
+            env.messages.update(
+                env.messages.get(MessageId("m1"))!!.copy(
+                    status = MessageStatus.COMPLETE,
+                    usage = Usage(promptTokens = 9, completionTokens = 6, cachedPromptTokens = 4, cost = 0.02),
+                ),
+            )
+            assertEquals(
+                listOf<Any?>(9L, 4L, 6L, 0.02, "model-a", "prov-a"),
+                env.db.denormalisedUsage("m1"),
+            )
+        }
+    }
 }
+
+/** The v3 columns for one message, in schema order. */
+private fun Db.denormalisedUsage(id: String): List<Any?> = query(
+    """
+    SELECT usage_prompt_tokens, usage_cached_tokens, usage_completion_tokens,
+           usage_cost_cny, model_id, provider_id
+    FROM messages
+    WHERE id = ?
+    """.trimIndent(),
+    listOf(id),
+) { row ->
+    listOf(
+        if (row.isNull(0)) null else row.long(0),
+        if (row.isNull(1)) null else row.long(1),
+        if (row.isNull(2)) null else row.long(2),
+        row.double(3),
+        row.string(4),
+        row.string(5),
+    )
+}.single()

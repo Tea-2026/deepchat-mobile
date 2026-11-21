@@ -187,7 +187,8 @@ object ExportJson {
         put("promptTokens", usage.promptTokens)
         put("completionTokens", usage.completionTokens)
         put("reasoningTokens", usage.reasoningTokens)
-        put("costUsd", usage.costUsd)
+        put("cachedPromptTokens", usage.cachedPromptTokens)
+        put("cost", usage.cost)
     }
 
     private fun encodePart(part: MessagePart): JsonValue = when (part) {
@@ -471,7 +472,9 @@ object ExportJson {
         promptTokens = obj.intOrNull("promptTokens") ?: 0,
         completionTokens = obj.intOrNull("completionTokens") ?: 0,
         reasoningTokens = obj.intOrNull("reasoningTokens") ?: 0,
-        costUsd = obj.doubleOrNull("costUsd"),
+        cachedPromptTokens = obj.intOrNull("cachedPromptTokens") ?: 0,
+        // Accepts bundles exported before 0.2.0, when the key was "costUsd".
+        cost = obj.doubleOrNull("cost") ?: obj.doubleOrNull("costUsd"),
     )
 
     private fun decodePart(value: JsonValue, attachmentIds: MappedIds<AttachmentId>): MessagePart {

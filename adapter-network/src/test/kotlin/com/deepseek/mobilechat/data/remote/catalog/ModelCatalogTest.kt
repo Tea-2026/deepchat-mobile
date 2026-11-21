@@ -219,4 +219,105 @@ class ModelCatalogTest {
 
         assertTrue((result as BalanceResult.Failed).error is AppError.ProviderAuth)
     }
+
+    // -----------------------------------------------------------------------
+    // DeepSeek balance
+    // -----------------------------------------------------------------------
+
+    private val deepSeekBalanceFixture = """
+        {"is_available":true,"balance_infos":[
+          {"currency":"CNY","total_balance":"110.00",
+           "granted_balance":"10.00","topped_up_balance":"100.00"}
+        ]}
+    """.trimIndent()
+
+    @Test
+    fun `deepseek balance reads the cny total from user balance`() {
+        val caller = RecordingHttpCaller { HttpResponse.json(deepSeekBalanceFixture) }
+        val catalog = catalogWith(caller, FakeSecretStore(mapOf("provider.test" to "sk-ds")))
+
+        val result = runBlocking {
+            catalog.balance(
+                testProfile(ProviderProtocol.OPENAI_COMPATIBLE, baseUrl = "https://api.deepseek.com/v1"),
+            )
+        }
+
+        val available = result as BalanceResult.Available
+        assertEquals(110.0, available.amount, 0.0001)
+        assertEquals("CNY", available.currency)
+        assertEquals("余额", available.label)
+
+        val call = caller.calls.single()
+        assertEquals("GET", call.method)
+        assertEquals("https://api.deepseek.com/user/balance", call.url)
+        assertEquals("Bearer sk-ds", call.headers["Authorization"])
+    }
+
+    @Test
+    fun `deepseek balance url normalizes every base url shape`() {
+        val expected = "https://api.deepseek.com/user/balance"
+
+        assertEquals(expected, deepSeekBalanceUrl("https://api.deepseek.com"))
+        assertEquals(expected, deepSeekBalanceUrl("https://api.deepseek.com/"))
+        assertEquals(expected, deepSeekBalanceUrl("https://api.deepseek.com/v1"))
+        assertEquals(expected, deepSeekBalanceUrl("https://api.deepseek.com/anthropic"))
+        assertEquals(expected, deepSeekBalanceUrl("https://api.deepseek.com/anthropic/"))
+    }
+
+    @Test
+    fun `deepseek balance with empty balance_infos is a protocol failure`() {
+        val caller = RecordingHttpCaller { HttpResponse.json("""{"is_available":true,"balance_infos":[]}""") }
+        val catalog = catalogWith(caller, FakeSecretStore(mapOf("provider.test" to "sk-ds")))
+
+        val result = runBlocking {
+            catalog.balance(testProfile(ProviderProtocol.OPENAI_COMPATIBLE, baseUrl = "https://api.deepseek.com"))
+        }
+
+        assertTrue((result as BalanceResult.Failed).error is AppError.ProviderProtocol)
+        assertNull(parseDeepSeekBalance("""{"is_available":true,"balance_infos":[]}"""))
+    }
+
+    @Test
+    fun `deepseek balance 401 is reported as Failed`() {
+        val caller = RecordingHttpCaller { HttpResponse.json("""{"error":"bad key"}""", status = 401) }
+        val catalog = catalogWith(caller, FakeSecretStore(mapOf("provider.test" to "sk-ds")))
+
+        val result = runBlocking {
+            catalog.balance(testProfile(ProviderProtocol.OPENAI_COMPATIBLE, baseUrl = "https://api.deepseek.com"))
+        }
+
+        assertTrue((result as BalanceResult.Failed).error is AppError.ProviderAuth)
+    }
+
+    @Test
+    fun `deepseek balance with is_available false still reports the amount and says so`() {
+        val caller = RecordingHttpCaller {
+            HttpResponse.json(
+                """{"is_available":false,"balance_infos":[{"currency":"CNY","total_balance":"0.00"}]}""",
+            )
+        }
+        val catalog = catalogWith(caller, FakeSecretStore(mapOf("provider.test" to "sk-ds")))
+
+        val result = runBlocking {
+            catalog.balance(testProfile(ProviderProtocol.OPENAI_COMPATIBLE, baseUrl = "https://api.deepseek.com"))
+        }
+
+        val available = result as BalanceResult.Available
+        assertEquals(0.0, available.amount, 0.0)
+        assertEquals("CNY", available.currency)
+        assertTrue(available.label.contains("不可用"))
+    }
+
+    @Test
+    fun `deepseek balance without a key is Failed SecretMissing`() {
+        val caller = RecordingHttpCaller { error("must not be called") }
+        val catalog = catalogWith(caller, FakeSecretStore())
+
+        val result = runBlocking {
+            catalog.balance(testProfile(ProviderProtocol.OPENAI_COMPATIBLE, baseUrl = "https://api.deepseek.com"))
+        }
+
+        assertTrue((result as BalanceResult.Failed).error is AppError.SecretMissing)
+        assertTrue(caller.calls.isEmpty())
+    }
 }

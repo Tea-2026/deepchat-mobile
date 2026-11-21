@@ -18,6 +18,7 @@ import com.deepseek.mobilechat.application.ProviderProfileStore
 import com.deepseek.mobilechat.application.ProviderService
 import com.deepseek.mobilechat.application.SearchService
 import com.deepseek.mobilechat.application.TransferService
+import com.deepseek.mobilechat.application.UsageService
 
 /**
  * The full set of capabilities the UI is allowed to touch.
@@ -43,6 +44,7 @@ interface AppServices {
     val contextAssembler: ContextAssembler
     val clock: ClockPort
     val fileImport: FileImportPort
+    val usage: UsageService
 }
 
 val LocalAppServices = staticCompositionLocalOf<AppServices> {

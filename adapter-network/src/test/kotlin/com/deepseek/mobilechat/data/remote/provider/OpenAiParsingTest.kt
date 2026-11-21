@@ -13,6 +13,7 @@ import com.deepseek.mobilechat.domain.SamplingParams
 import com.deepseek.mobilechat.domain.SearchHit
 import com.deepseek.mobilechat.domain.ThinkingLevel
 import com.deepseek.mobilechat.domain.Usage
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -46,6 +47,25 @@ class OpenAiParsingTest {
         data: [DONE]
 
     """.trimIndent()
+
+    /**
+     * Recorded shape behind the crash report: the interrupted assistant turn
+     * stored visible text plus a tool call, and — because this app never
+     * executes tool calls — no `role:"tool"` answer followed it. Replaying that
+     * history used to make DeepSeek answer
+     * `HTTP 400: Invalid assistant message: content or tool_calls must be set`.
+     */
+    private val interruptedToolCallHistory = listOf(
+        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("世卫是什么"))),
+        PromptMessage(
+            MessageRole.ASSISTANT,
+            listOf(
+                MessagePart.Text("世卫 +"),
+                MessagePart.ToolCall("call_1", "web_search", """{"query":"世卫"}"""),
+            ),
+        ),
+        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("继续"))),
+    )
 
     private fun bodyJson(text: String): JsonObject = parseJsonObject(text)!!
 
@@ -275,6 +295,10 @@ class OpenAiParsingTest {
                         MessagePart.ToolCall("call_1", "get_weather", """{"city":"Paris"}"""),
                     ),
                 ),
+                PromptMessage(
+                    MessageRole.TOOL,
+                    listOf(MessagePart.ToolResult("call_1", true, "sunny")),
+                ),
             ),
         )
 
@@ -287,6 +311,95 @@ class OpenAiParsingTest {
             "{\"city\":\"Paris\"}",
             call["function"]!!.jsonObject["arguments"]!!.jsonPrimitive.content,
         )
+    }
+
+    @Test
+    fun `answered tool call without text uses an empty string instead of null content`() {
+        val request = testRequest(
+            messages = listOf(
+                PromptMessage(
+                    MessageRole.ASSISTANT,
+                    listOf(MessagePart.ToolCall("call_1", "get_weather", """{"city":"Paris"}""")),
+                ),
+                PromptMessage(
+                    MessageRole.TOOL,
+                    listOf(MessagePart.ToolResult("call_1", true, "sunny")),
+                ),
+            ),
+        )
+
+        val message = bodyJson(buildOpenAiBody(request))["messages"]!!.jsonArray[0].jsonObject
+        assertEquals("", message["content"]!!.jsonPrimitive.content)
+        assertEquals("call_1", message["tool_calls"]!!.jsonArray.single().jsonObject["id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `orphan assistant tool calls are stripped from the request body`() {
+        val messages = bodyJson(
+            buildOpenAiBody(testRequest(messages = interruptedToolCallHistory)),
+        )["messages"]!!.jsonArray
+
+        // The tool call is not sent (no tool result answers it), but the
+        // assistant's visible text is preserved as a legal plain message.
+        assertEquals(
+            listOf("user", "assistant", "user"),
+            messages.map { it.jsonObject["role"]!!.jsonPrimitive.content },
+        )
+        val assistant = messages[1].jsonObject
+        assertEquals("世卫 +", assistant["content"]!!.jsonPrimitive.content)
+        assertTrue(messages.none { it.jsonObject.containsKey("tool_calls") })
+        assertTrue(messages.none { it.jsonObject["content"] == JsonNull })
+    }
+
+    @Test
+    fun `tool-call-only assistant turn is dropped from the request body`() {
+        val messages = bodyJson(
+            buildOpenAiBody(
+                testRequest(
+                    messages = listOf(
+                        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("search"))),
+                        PromptMessage(
+                            MessageRole.ASSISTANT,
+                            listOf(
+                                MessagePart.ToolCall("call_1", "web_search", """{"query":"x"}"""),
+                            ),
+                        ),
+                        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("continue"))),
+                    ),
+                ),
+            ),
+        )["messages"]!!.jsonArray
+
+        // After stripping the unanswered call nothing is left, so the turn is
+        // omitted instead of becoming `content:null` with tool_calls.
+        assertEquals(
+            listOf("user", "user"),
+            messages.map { it.jsonObject["role"]!!.jsonPrimitive.content },
+        )
+        assertTrue(messages.none { it.jsonObject["content"] == JsonNull })
+    }
+
+    @Test
+    fun `empty assistant turn is dropped from the request body`() {
+        val messages = bodyJson(
+            buildOpenAiBody(
+                testRequest(
+                    messages = listOf(
+                        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("tell me"))),
+                        PromptMessage(MessageRole.ASSISTANT, emptyList()),
+                        PromptMessage(MessageRole.USER, listOf(MessagePart.Text("continue"))),
+                    ),
+                ),
+            ),
+        )["messages"]!!.jsonArray
+
+        // An interrupted turn that never produced a delta has neither content
+        // nor tool_calls; DeepSeek rejects that with the recorded 400 as well.
+        assertEquals(
+            listOf("user", "user"),
+            messages.map { it.jsonObject["role"]!!.jsonPrimitive.content },
+        )
+        assertTrue(messages.none { it.jsonObject["content"] == JsonNull })
     }
 
     @Test

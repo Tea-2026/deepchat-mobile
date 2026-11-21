@@ -78,6 +78,30 @@ class AnthropicParsingTest {
     }
 
     @Test
+    fun `cache hits are counted inside the prompt total and reported separately`() {
+        // Anthropic's input_tokens excludes the cache. A 90-token cache hit and
+        // a 5-token cache write therefore mean 105 prompt tokens, of which 90
+        // are billed at the discounted cache rate.
+        val stream = """
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":5}}}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+        """.trimIndent()
+
+        val usage = parseAnthropicStream(stream)
+            .filterIsInstance<GenerationEvent.UsageReport>()
+            .single()
+            .usage
+
+        assertEquals(Usage(promptTokens = 105, completionTokens = 7, cachedPromptTokens = 90), usage)
+    }
+
+    @Test
     fun `stop reason mapping covers anthropic values`() {
         assertEquals(FinishReason.STOP, mapAnthropicStopReason("end_turn"))
         assertEquals(FinishReason.STOP, mapAnthropicStopReason("stop_sequence"))
@@ -298,5 +322,75 @@ class AnthropicParsingTest {
             "search",
             body["tools"]!!.jsonArray.single().jsonObject["name"]!!.jsonPrimitive.content,
         )
+    }
+
+    @Test
+    fun `orphan assistant tool_use is stripped from the anthropic request`() {
+        val request = testRequest(
+            messages = listOf(
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("世卫是什么"))),
+                PromptMessage(
+                    MessageRole.ASSISTANT,
+                    listOf(
+                        MessagePart.Text("世卫 +"),
+                        MessagePart.ToolCall("toolu_1", "web_search", """{"query":"世卫"}"""),
+                    ),
+                ),
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("继续"))),
+            ),
+        )
+
+        val messages = bodyJson(buildAnthropicBody(request))["messages"]!!.jsonArray
+
+        // The unanswered tool_use block is removed, the visible text stays.
+        assertEquals(3, messages.size)
+        assertEquals("assistant", messages[1].jsonObject["role"]!!.jsonPrimitive.content)
+        val blocks = messages[1].jsonObject["content"]!!.jsonArray
+        assertEquals(1, blocks.size)
+        assertEquals("世卫 +", blocks[0].jsonObject["text"]!!.jsonPrimitive.content)
+        assertTrue(
+            messages.flatMap { it.jsonObject["content"]!!.jsonArray }.none {
+                it.jsonObject["type"]?.jsonPrimitive?.content == "tool_use"
+            },
+        )
+    }
+
+    @Test
+    fun `tool-call-only assistant turn is dropped from the anthropic request`() {
+        val request = testRequest(
+            messages = listOf(
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("search"))),
+                PromptMessage(
+                    MessageRole.ASSISTANT,
+                    listOf(MessagePart.ToolCall("toolu_1", "web_search", """{"query":"x"}""")),
+                ),
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("continue"))),
+            ),
+        )
+
+        val messages = bodyJson(buildAnthropicBody(request))["messages"]!!.jsonArray
+
+        assertEquals(1, messages.size)
+        assertEquals("user", messages[0].jsonObject["role"]!!.jsonPrimitive.content)
+        assertEquals(2, messages[0].jsonObject["content"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun `empty assistant turn is dropped from the anthropic request`() {
+        val request = testRequest(
+            messages = listOf(
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("tell me"))),
+                PromptMessage(MessageRole.ASSISTANT, emptyList()),
+                PromptMessage(MessageRole.USER, listOf(MessagePart.Text("continue"))),
+            ),
+        )
+
+        val messages = bodyJson(buildAnthropicBody(request))["messages"]!!.jsonArray
+
+        // Anthropic would turn the empty turn into a `text:""` block; it is not
+        // something the model can validate as a turn, so it is omitted too.
+        assertEquals(1, messages.size)
+        assertEquals("user", messages[0].jsonObject["role"]!!.jsonPrimitive.content)
+        assertEquals(2, messages[0].jsonObject["content"]!!.jsonArray.size)
     }
 }

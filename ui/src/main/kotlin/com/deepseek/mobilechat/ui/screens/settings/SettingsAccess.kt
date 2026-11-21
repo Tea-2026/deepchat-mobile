@@ -46,13 +46,22 @@ internal const val TAVILY_SECRET_REF = "search.tavily"
 internal const val BRAVE_SECRET_REF = "search.brave"
 internal const val SERPER_SECRET_REF = "search.serper"
 
+/**
+ * Secret ref for a search source; empty for sources that need no credential.
+ * `DEEPSEEK` reuses the chat provider's key and `BING` is keyless, so the
+ * settings UI must not render a key field for either.
+ */
 internal fun searchSecretRef(kind: SearchProviderKind): String = when (kind) {
+    SearchProviderKind.DEEPSEEK -> ""
+    SearchProviderKind.BING -> ""
     SearchProviderKind.TAVILY -> TAVILY_SECRET_REF
     SearchProviderKind.BRAVE -> BRAVE_SECRET_REF
     SearchProviderKind.SERPER -> SERPER_SECRET_REF
 }
 
 internal fun searchProviderLabel(kind: SearchProviderKind): String = when (kind) {
+    SearchProviderKind.DEEPSEEK -> "DeepSeek 自带联网"
+    SearchProviderKind.BING -> "必应免密钥"
     SearchProviderKind.TAVILY -> "Tavily"
     SearchProviderKind.BRAVE -> "Brave"
     SearchProviderKind.SERPER -> "Serper"

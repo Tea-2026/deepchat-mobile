@@ -147,7 +147,7 @@ internal class ChatGenerationRunner(
                     is GenerationEvent.UsageReport -> {
                         val reported = event.usage
                         usage = reported.copy(
-                            costUsd = reported.costUsd ?: modelCatalog.costUsd(descriptor, reported),
+                            cost = reported.cost ?: modelCatalog.costCny(descriptor, reported),
                         )
                     }
 

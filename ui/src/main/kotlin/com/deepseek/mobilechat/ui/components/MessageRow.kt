@@ -210,7 +210,8 @@ private fun AssistantTurnHeader(
         Text(
             text = resolvedName.ifBlank { "模型" },
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // The assistant side is the blue one (matching the brand avatar).
+            color = MaterialTheme.colorScheme.primary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
@@ -526,7 +527,7 @@ private fun BranchArrow(
     }
 }
 
-/** `1,234 tokens · $0.0021` — only rendered when the provider reported usage. */
+/** `1,234 tokens · ¥0.0021` — only rendered when the provider reported usage. */
 @Composable
 fun UsageFooter(usage: Usage, modifier: Modifier = Modifier) {
     val chatColors = LocalChatColors.current
@@ -535,12 +536,17 @@ fun UsageFooter(usage: Usage, modifier: Modifier = Modifier) {
         buildString {
             append(formatCount(total))
             append(" tokens")
+            if (usage.cachedPromptTokens > 0) {
+                append("（缓存 ")
+                append(formatCount(usage.cachedPromptTokens))
+                append("）")
+            }
             if (usage.reasoningTokens > 0) {
                 append("（思考 ")
                 append(formatCount(usage.reasoningTokens))
                 append("）")
             }
-            usage.costUsd?.let {
+            usage.cost?.let {
                 append(" · ")
                 append(formatCost(it))
             }
@@ -595,9 +601,10 @@ private fun formatCount(value: Int): String {
     return out.toString()
 }
 
+/** Money is CNY everywhere in the UI; tiny per-message amounts keep 4 decimals. */
 private fun formatCost(cost: Double): String = when {
-    cost <= 0.0 -> "$0"
-    cost < 0.0001 -> "<$0.0001"
-    cost < 1.0 -> "$" + String.format(Locale.US, "%.4f", cost)
-    else -> "$" + String.format(Locale.US, "%.2f", cost)
+    cost <= 0.0 -> "¥0"
+    cost < 0.0001 -> "<¥0.0001"
+    cost < 1.0 -> "¥" + String.format(Locale.US, "%.4f", cost)
+    else -> "¥" + String.format(Locale.US, "%.2f", cost)
 }

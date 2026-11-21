@@ -52,6 +52,7 @@ fun RootScreen(
     onOpenContextDebug: (ConversationId) -> Unit = {},
     onOpenInjections: (ConversationId) -> Unit = {},
     onOpenExport: (ConversationId) -> Unit = {},
+    onOpenUsage: () -> Unit = {},
     onManageProviders: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
@@ -134,6 +135,10 @@ fun RootScreen(
                     onOpenSettings = {
                         closeDrawer()
                         onOpenSettings()
+                    },
+                    onOpenUsage = {
+                        closeDrawer()
+                        onOpenUsage()
                     },
                     onConversationDeleted = { id ->
                         if (currentRaw == id.raw) {

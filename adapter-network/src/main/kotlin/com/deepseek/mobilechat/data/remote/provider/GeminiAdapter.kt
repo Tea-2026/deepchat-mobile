@@ -98,6 +98,7 @@ internal fun buildGeminiBody(
 ): String {
     val contents = buildJsonArray {
         request.messages
+            .replayableHistory()
             .filter { it.role != MessageRole.SYSTEM }
             .forEach { prompt ->
                 val content = geminiContent(prompt, resolveAttachment)
@@ -278,6 +279,9 @@ internal class GeminiStreamParser {
                 promptTokens = metadata.int("promptTokenCount") ?: 0,
                 completionTokens = metadata.int("candidatesTokenCount") ?: 0,
                 reasoningTokens = metadata.int("thoughtsTokenCount") ?: 0,
+                // Gemini bills cached prompt tokens at a discount and reports
+                // them separately from the prompt total.
+                cachedPromptTokens = metadata.int("cachedContentTokenCount") ?: 0,
             )
         }
 

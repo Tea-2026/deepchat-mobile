@@ -77,12 +77,12 @@ class DefaultChatServiceBranchTest {
     }
 
     @Test
-    fun `regenerate refuses a user message`() = runTest {
+    fun `regenerate refuses a user message that already has a reply`() = runTest {
         val harness = harnessWithFirstTurn(testScheduler)
 
         val error = harness.service.regenerate(u1).requireErr()
 
-        assertTrue(error is AppError.Validation)
+        assertTrue(error is AppError.BranchConflict)
         assertEquals(2, harness.messages.list(cid).size)
     }
 
@@ -121,10 +121,11 @@ class DefaultChatServiceBranchTest {
     }
 
     @Test
-    fun `editing a message with children forks into a new user sibling`() = runTest {
+    fun `editing a message with children forks into a new user sibling and starts its reply`() = runTest {
         val harness = harnessWithFirstTurn(testScheduler)
 
         val result = harness.service.editMessage(u1, "forked text").requireOk()
+        advanceUntilIdle()
 
         assertTrue(result.forked)
         assertNotEquals(u1, result.messageId)
@@ -136,11 +137,34 @@ class DefaultChatServiceBranchTest {
         assertEquals(listOf(MessagePart.Text("forked text")), sibling.parts)
         assertEquals(MessageStatus.COMPLETE, sibling.status)
 
+        // The new branch is answered immediately: an assistant placeholder is
+        // appended under the sibling and handed to the queue.
+        val reply = harness.messages.list(cid).single { it.parentId == sibling.id }
+        assertEquals(MessageRole.ASSISTANT, reply.role)
+        assertEquals(MessageStatus.COMPLETE, reply.status)
+        assertEquals(reply.id, harness.conversations.get(cid)!!.activeLeafId)
+        assertEquals(1, harness.chat.requests.size)
+
         val original = harness.messages.get(u1)!!
         assertEquals("original", original.text)
         assertNull(original.editedAt)
-        assertEquals(result.messageId, harness.conversations.get(cid)!!.activeLeafId)
-        assertEquals(3, harness.messages.list(cid).size)
+        assertEquals(4, harness.messages.list(cid).size)
+    }
+
+    @Test
+    fun `regenerate on an unanswered user leaf starts its reply`() = runTest {
+        val harness = ChatHarness(testScheduler)
+        harness.conversations.put(conversation("c1", title = "chat", activeLeafId = "u1"))
+        harness.messages.put(userMessage("u1", text = "never answered", seq = 1))
+
+        harness.service.regenerate(u1).requireOk()
+        advanceUntilIdle()
+
+        val reply = harness.messages.list(cid).single { it.parentId == u1 }
+        assertEquals(MessageRole.ASSISTANT, reply.role)
+        assertEquals(MessageStatus.COMPLETE, reply.status)
+        assertEquals(reply.id, harness.conversations.get(cid)!!.activeLeafId)
+        assertEquals(1, harness.chat.requests.size)
     }
 
     @Test
@@ -260,6 +284,64 @@ class DefaultChatServiceBranchTest {
 
         assertTrue(error is AppError.Validation)
         assertTrue(harness.chat.requests.isEmpty())
+    }
+
+    @Test
+    fun `continueGeneration resumes an interrupted message`() = runTest {
+        val harness = ChatHarness(testScheduler)
+        harness.conversations.put(conversation("c1", title = "chat", activeLeafId = "a1"))
+        harness.messages.put(
+            userMessage("u1", text = "tell me", seq = 1),
+            assistantMessage(
+                id = "a1",
+                text = "part one",
+                seq = 1,
+                parentId = "u1",
+                status = MessageStatus.CANCELLED,
+                finishReason = FinishReason.CANCELLED,
+            ).copy(error = "生成已中断：应用在生成过程中退出"),
+        )
+        harness.chat.events = listOf(
+            GenerationEvent.TextDelta(" and part two"),
+            GenerationEvent.Finished(FinishReason.STOP),
+        )
+
+        harness.service.continueGeneration(a1).requireOk()
+        advanceUntilIdle()
+
+        val continued = harness.messages.get(a1)!!
+        assertEquals("part one and part two", continued.text)
+        assertEquals(MessageStatus.COMPLETE, continued.status)
+        assertNull(continued.error)
+    }
+
+    @Test
+    fun `continueGeneration resumes a failed message after partial output`() = runTest {
+        val harness = ChatHarness(testScheduler)
+        harness.conversations.put(conversation("c1", title = "chat", activeLeafId = "a1"))
+        harness.messages.put(
+            userMessage("u1", text = "tell me", seq = 1),
+            assistantMessage(
+                id = "a1",
+                text = "part one",
+                seq = 1,
+                parentId = "u1",
+                status = MessageStatus.FAILED,
+                finishReason = FinishReason.ERROR,
+            ).copy(error = "HTTP 400: Invalid assistant message"),
+        )
+        harness.chat.events = listOf(
+            GenerationEvent.TextDelta(" and part two"),
+            GenerationEvent.Finished(FinishReason.STOP),
+        )
+
+        harness.service.continueGeneration(a1).requireOk()
+        advanceUntilIdle()
+
+        val continued = harness.messages.get(a1)!!
+        assertEquals("part one and part two", continued.text)
+        assertEquals(MessageStatus.COMPLETE, continued.status)
+        assertNull(continued.error)
     }
 
     @Test

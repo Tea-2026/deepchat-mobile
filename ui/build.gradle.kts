@@ -47,6 +47,7 @@ dependencies {
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
+    implementation(libs.jetbrains.markdown)
     implementation(libs.kotlinx.coroutines.core)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)

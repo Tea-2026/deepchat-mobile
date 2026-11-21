@@ -44,6 +44,7 @@ class SchemaTest {
             listOf(
                 "idx_messages_tree",
                 "idx_messages_time",
+                "idx_messages_created_at",
                 "idx_conversations_updated",
             ).forEach { index ->
                 assertTrue("missing index $index", ("index" to index) in objects)
@@ -59,12 +60,12 @@ class SchemaTest {
     }
 
     @Test
-    fun schemaVersionIsTwo() {
+    fun schemaVersionIsThree() {
         TestEnv().use { env ->
             // Literal on purpose: bumping the DDL without writing a migration
             // must fail here as well as in the migration tests.
-            assertEquals(2, Schema.VERSION)
-            assertEquals(2, env.db.userVersion())
+            assertEquals(3, Schema.VERSION)
+            assertEquals(3, env.db.userVersion())
         }
     }
 
@@ -122,9 +123,37 @@ class SchemaTest {
                         "usage_json",
                         "finish_reason",
                         "error",
+                        "usage_prompt_tokens",
+                        "usage_cached_tokens",
+                        "usage_completion_tokens",
+                        "usage_cost_cny",
+                        "model_id",
+                        "provider_id",
                     ),
                 ),
             )
+        }
+    }
+
+    @Test
+    fun usageColumnsAreNullableSoRowsWithoutUsageStayRepresentable() {
+        TestEnv().use { env ->
+            val notNull = env.db
+                .query("PRAGMA table_info(messages)", emptyList()) { row ->
+                    (row.string(1) ?: "") to row.int(3)
+                }
+                .toMap()
+
+            listOf(
+                "usage_prompt_tokens",
+                "usage_cached_tokens",
+                "usage_completion_tokens",
+                "usage_cost_cny",
+                "model_id",
+                "provider_id",
+            ).forEach { column ->
+                assertEquals("$column must be nullable", 0, notNull[column])
+            }
         }
     }
 

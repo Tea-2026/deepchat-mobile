@@ -50,8 +50,8 @@ class FakeConversationStore : ConversationStore {
 
     val state = MutableStateFlow<Map<ConversationId, Conversation>>(emptyMap())
 
-    fun put(conversation: Conversation) {
-        state.update { it + (conversation.id to conversation) }
+    fun put(vararg conversations: Conversation) {
+        state.update { current -> current + conversations.associateBy { it.id } }
     }
 
     override fun observeAll(): Flow<List<Conversation>> = state.map { it.values.toList() }

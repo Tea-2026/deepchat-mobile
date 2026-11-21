@@ -82,7 +82,8 @@ object JsonCodecs {
         put("promptTokens", usage.promptTokens)
         put("completionTokens", usage.completionTokens)
         put("reasoningTokens", usage.reasoningTokens)
-        put("costUsd", usage.costUsd.jsonNumber())
+        put("cachedPromptTokens", usage.cachedPromptTokens)
+        put("cost", usage.cost.jsonNumber())
     }.toString()
 
     fun decodeUsage(json: String?): Usage? {
@@ -92,7 +93,11 @@ object JsonCodecs {
             promptTokens = obj.intOrNull("promptTokens") ?: 0,
             completionTokens = obj.intOrNull("completionTokens") ?: 0,
             reasoningTokens = obj.intOrNull("reasoningTokens") ?: 0,
-            costUsd = obj.doubleOrNull("costUsd"),
+            cachedPromptTokens = obj.intOrNull("cachedPromptTokens") ?: 0,
+            // Rows written before 0.2.0 stored a USD estimate under "costUsd".
+            // They were converted wrong anyway (the book had no DeepSeek prices),
+            // so they decode as CNY without re-conversion and age out naturally.
+            cost = obj.doubleOrNull("cost") ?: obj.doubleOrNull("costUsd"),
         )
     }
 

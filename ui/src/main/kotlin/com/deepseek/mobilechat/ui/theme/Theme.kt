@@ -85,9 +85,13 @@ data class ChatColors(
     /** Icon+label colour that sits *on* the accent fill. */
     val onAccent: Color = Color(0xFFFFFFFF),
 ) {
-    /** Tint a brand logo sits on: dark disc in light mode, accent in dark. */
-    val brandDisc: Color get() = Color(0xFF111827)
-    val brandDiscDark: Color get() = accentSoft
+    /**
+     * Disc a model/brand logo sits on. The assistant side is the blue one, so
+     * this is the accent in both themes (`BrandAvatar` also reads
+     * `colorScheme.primary` directly).
+     */
+    val brandDisc: Color get() = AccentBlue
+    val brandDiscDark: Color get() = AccentBlueDark
 }
 
 private val LightChatColors = ChatColors(

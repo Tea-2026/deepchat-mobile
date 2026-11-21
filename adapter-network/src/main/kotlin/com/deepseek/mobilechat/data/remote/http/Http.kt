@@ -28,6 +28,44 @@ interface HttpCaller {
         headers: Map<String, String> = emptyMap(),
         body: String? = null,
     ): HttpResponse
+
+    /**
+     * Same as [execute] but keeps the body as raw bytes.
+     *
+     * Needed when the declared charset cannot be trusted: Bing's RSS feed
+     * declares `encoding="utf-8"` but ships GB18030 for Chinese payloads, and
+     * decoding it as UTF-8 destroys the text before the caller can retry. The
+     * default joins [HttpResponse.bodyLines] as UTF-8 so existing fakes keep
+     * working; real transports override it with a raw read.
+     */
+    fun executeBytes(
+        method: String,
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+    ): HttpByteResponse = execute(method, url, headers).use { response ->
+        HttpByteResponse(
+            status = response.status,
+            headers = response.headers,
+            bytes = response.bodyLines.joinToString("\n").toByteArray(Charsets.UTF_8),
+        )
+    }
+}
+
+/**
+ * A response body kept as raw bytes, for payloads whose charset must be
+ * sniffed by the caller rather than taken from the `Content-Type` header.
+ */
+class HttpByteResponse(
+    val status: Int,
+    val headers: Map<String, String> = emptyMap(),
+    val bytes: ByteArray = ByteArray(0),
+) {
+
+    val isSuccess: Boolean get() = status in 200..299
+
+    /** Case-insensitive header lookup (HTTP header names are case-insensitive). */
+    fun header(name: String): String? =
+        headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 }
 
 /**
@@ -173,6 +211,15 @@ fun HttpResponse.requireSuccess() {
     )
 }
 
+/** Byte-body counterpart of [requireSuccess]; the error snippet is decoded best-effort. */
+fun HttpByteResponse.requireSuccess() {
+    if (isSuccess) return
+    throw ProviderHttpException(
+        HttpErrors.statusError(status, header("Retry-After"), bytes.decodeToString())
+            ?: AppError.ProviderProtocol("HTTP $status"),
+    )
+}
+
 /**
  * Production [HttpCaller] backed by a synchronous OkHttp call.
  * Timeouts are tuned for streaming completions: 60s to connect, 300s between
@@ -233,6 +280,38 @@ class OkHttpHttpCaller(
             bodyLines = lines,
             onClose = { runCatching { response.close() } },
         )
+    }
+
+    override fun executeBytes(
+        method: String,
+        url: String,
+        headers: Map<String, String>,
+    ): HttpByteResponse {
+        val builder = Request.Builder().url(url).method(method.uppercase(), null)
+        headers.forEach { (name, value) -> builder.header(name, value) }
+
+        val response = try {
+            client.newCall(builder.build()).execute()
+        } catch (t: IOException) {
+            throw ProviderHttpException(HttpErrors.ioError(t))
+        } catch (t: Throwable) {
+            throw ProviderHttpException(HttpErrors.unknown(t))
+        }
+
+        return response.use { executed ->
+            val bytes = executed.body.bytes()
+            val mapped = executed.headers.toMultimap()
+                .mapValues { (_, values) -> values.firstOrNull().orEmpty() }
+            if (!executed.isSuccessful) {
+                val error = HttpErrors.statusError(
+                    executed.code,
+                    executed.header("Retry-After"),
+                    bytes.decodeToString(),
+                ) ?: AppError.ProviderProtocol("HTTP ${executed.code}")
+                throw ProviderHttpException(error)
+            }
+            HttpByteResponse(executed.code, mapped, bytes)
+        }
     }
 
     companion object {

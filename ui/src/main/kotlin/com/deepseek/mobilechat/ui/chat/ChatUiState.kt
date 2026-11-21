@@ -55,6 +55,12 @@ data class ChatUiState(
     val branches: Map<MessageId, BranchPosition> = emptyMap(),
     val injections: List<ContextInjection> = emptyList(),
     val isGenerating: Boolean = false,
+    /**
+     * The visible branch ends at an unanswered user message (legacy fork data,
+     * or a fork whose generation failed). The UI offers 「生成回复」; it never
+     * starts a request by itself.
+     */
+    val needsReply: Boolean = false,
     /** A web search is running for the message the user just sent. */
     val isSearching: Boolean = false,
     /** "联网" toggle in the composer; off by default so nothing leaves the device unasked. */

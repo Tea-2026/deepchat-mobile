@@ -35,6 +35,7 @@ import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
 import com.deepseek.mobilechat.domain.MessageTree
+import com.deepseek.mobilechat.domain.SearchHit
 
 /**
  * Default [ChatService].
@@ -116,13 +117,14 @@ class DefaultChatService(
         text: String,
         attachmentIds: List<AttachmentId>,
         ephemeralInjection: String?,
+        searchHits: List<SearchHit>,
     ): Outcome<SendResult> {
         val conversation = conversationStore.get(conversationId)
             ?: return Outcome.Err(AppError.Validation("conversation not found: ${conversationId.raw}"))
         if (text.isBlank() && attachmentIds.isEmpty()) {
             return Outcome.Err(AppError.Validation("message has neither text nor attachments"))
         }
-        val parts = when (val built = buildUserParts(text, attachmentIds)) {
+        val parts = when (val built = buildUserParts(text, attachmentIds, searchHits)) {
             is Outcome.Ok -> built.value
             is Outcome.Err -> return Outcome.Err(built.error)
         }
@@ -223,14 +225,38 @@ class DefaultChatService(
         }
     }
 
-    override suspend fun regenerate(messageId: MessageId): Outcome<Unit> =
-        turns.regenerate(messageId)
+    override suspend fun regenerate(messageId: MessageId): Outcome<Unit> {
+        val message = messageStore.get(messageId)
+            ?: return Outcome.Err(AppError.Validation("message not found: ${messageId.raw}"))
+        return when (message.role) {
+            MessageRole.ASSISTANT -> turns.regenerate(messageId)
+            // A user leaf is a branch without its reply: either legacy data
+            // written before fork edits generated one, or a fork whose
+            // generation failed. Starting the reply is the recovery, not a
+            // sibling user message.
+            MessageRole.USER -> turns.replyTo(messageId)
+            MessageRole.SYSTEM, MessageRole.TOOL -> Outcome.Err(
+                AppError.Validation("only assistant messages can be regenerated"),
+            )
+        }
+    }
 
     override suspend fun continueGeneration(messageId: MessageId): Outcome<Unit> =
         turns.continueGeneration(messageId)
 
-    override suspend fun editMessage(messageId: MessageId, text: String): Outcome<EditResult> =
-        editor.editMessage(messageId, text)
+    override suspend fun editMessage(messageId: MessageId, text: String): Outcome<EditResult> {
+        val result = when (val outcome = editor.editMessage(messageId, text)) {
+            is Outcome.Ok -> outcome.value
+            is Outcome.Err -> return outcome
+        }
+        if (!result.forked) return Outcome.Ok(result)
+        // A fork is a new branch: leaving the sibling user message unanswered
+        // would strand the user on a dead end with no request in flight.
+        return when (val reply = turns.replyTo(result.messageId)) {
+            is Outcome.Ok -> Outcome.Ok(result)
+            is Outcome.Err -> Outcome.Err(reply.error)
+        }
+    }
 
     override suspend fun switchToBranch(messageId: MessageId): Outcome<Unit> =
         editor.switchToBranch(messageId)
@@ -267,8 +293,9 @@ class DefaultChatService(
     private suspend fun buildUserParts(
         text: String,
         attachmentIds: List<AttachmentId>,
+        searchHits: List<SearchHit>,
     ): Outcome<List<MessagePart>> {
-        val parts = ArrayList<MessagePart>(attachmentIds.size + 1)
+        val parts = ArrayList<MessagePart>(attachmentIds.size + 2)
         if (text.isNotBlank()) parts += MessagePart.Text(text)
         attachmentIds.forEach { id ->
             val attachment = attachmentStore.get(id)
@@ -277,6 +304,12 @@ class DefaultChatService(
                 AttachmentKind.IMAGE -> MessagePart.Image(attachmentId = id)
                 else -> MessagePart.FileRef(attachmentId = id)
             }
+        }
+        // Recording the sources on the message is what lets the answer keep
+        // showing "参考了 N 个网页" after the app restarts; the injected text is
+        // only ever seen by the model.
+        if (searchHits.isNotEmpty()) {
+            parts += MessagePart.SearchResults(query = text.trim(), hits = searchHits)
         }
         return Outcome.Ok(parts)
     }

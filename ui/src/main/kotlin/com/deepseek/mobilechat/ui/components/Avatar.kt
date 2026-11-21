@@ -11,7 +11,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -21,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.deepseek.mobilechat.domain.ProviderProtocol
 import com.deepseek.mobilechat.ui.R
-import com.deepseek.mobilechat.ui.theme.LocalChatColors
 
 /**
  * Which brand mark represents a model.
@@ -65,10 +63,9 @@ private fun BrandMark.drawable(): Int? = when (this) {
 }
 
 /**
- * The model's brand mark on a disc (spec §8): a white-tinted logo on a dark
- * disc in light mode, and on a lifted dark disc in dark mode so it still reads
- * against pure black. Unknown providers fall back to the model name's initial
- * on the accent colour.
+ * The model's brand mark on a disc (spec §8): the assistant side is the **blue**
+ * one — an accent-filled disc with an on-primary logo. Unknown providers fall
+ * back to the model name's initial on the same blue disc.
  */
 @Composable
 fun BrandAvatar(
@@ -78,8 +75,8 @@ fun BrandAvatar(
     size: Dp = 20.dp,
 ) {
     val mark = resolveBrandMark(protocol, name)
-    val isDarkPage = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val disc = if (isDarkPage) Color(0xFF2A2F3A) else Color(0xFF111827)
+    val disc = MaterialTheme.colorScheme.primary
+    val onDisc = MaterialTheme.colorScheme.onPrimary
     val drawable = mark.drawable()
 
     Box(
@@ -93,13 +90,13 @@ fun BrandAvatar(
             Icon(
                 painter = painterResource(drawable),
                 contentDescription = null,
-                tint = Color.White,
+                tint = onDisc,
                 modifier = Modifier.size(size * 0.62f),
             )
         } else {
             Text(
                 text = initialOf(name),
-                color = Color.White,
+                color = onDisc,
                 fontSize = (size.value * 0.46f).sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -108,24 +105,27 @@ fun BrandAvatar(
 }
 
 /**
- * The user's own avatar (spec §8): a circular accent-soft disc with a person
- * glyph. There is no account system, so there is nothing to show a photo of.
+ * The user's own avatar (spec §8): **monochrome** — a neutral surface disc with
+ * the on-surface-variant person glyph, so the accent blue reads as "the AI"
+ * everywhere in the transcript. There is no account system, so there is
+ * nothing to show a photo of.
  */
 @Composable
 fun UserAvatar(
     modifier: Modifier = Modifier,
     size: Dp = 20.dp,
 ) {
-    val chatColors = LocalChatColors.current
+    val disc = MaterialTheme.colorScheme.surfaceContainerHigh
+    val glyph = MaterialTheme.colorScheme.onSurfaceVariant
     Box(
         modifier = modifier
             .size(size)
-            .background(chatColors.accentSoft, CircleShape),
+            .background(disc, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         PersonIcon(
             modifier = Modifier.size(size * 0.62f),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = glyph,
             contentDescription = "你",
         )
     }

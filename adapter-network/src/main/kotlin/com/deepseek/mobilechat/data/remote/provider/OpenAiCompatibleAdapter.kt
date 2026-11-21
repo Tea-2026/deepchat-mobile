@@ -103,7 +103,7 @@ internal fun buildOpenAiBody(
                 put("content", system)
             })
         }
-        request.messages.forEach { prompt ->
+        request.messages.replayableHistory().forEach { prompt ->
             addAll(openAiMessagesFor(prompt, resolveAttachment, reasoningEcho))
         }
     }
@@ -226,6 +226,11 @@ internal fun openAiMessagesFor(
     }
 
     val content: JsonElement = when {
+        // Strict OpenAI-compatible servers (DeepSeek) treat explicit
+        // `content: null` as "no content" even when tool_calls is present and
+        // answer 400 "content or tool_calls must be set". The spec allows an
+        // empty string, which both families accept.
+        contentParts.isEmpty() && toolCalls.isNotEmpty() -> JsonPrimitive("")
         contentParts.isEmpty() -> JsonNull
         // Text-only messages stay a plain string: the widest provider support.
         !hasImage -> JsonPrimitive(contentParts.joinToString("\n") { (it as JsonObject).str("text").orEmpty() })
@@ -351,7 +356,11 @@ internal fun usageFromOpenAi(usage: JsonObject): Usage = Usage(
     promptTokens = usage.int("prompt_tokens") ?: 0,
     completionTokens = usage.int("completion_tokens") ?: 0,
     reasoningTokens = usage.obj("completion_tokens_details")?.int("reasoning_tokens") ?: 0,
-    costUsd = null,
+    // OpenAI reports the cache slice under a details object; DeepSeek puts
+    // `prompt_cache_hit_tokens` at the top level of the same usage object.
+    cachedPromptTokens = usage.obj("prompt_tokens_details")?.int("cached_tokens")
+        ?: usage.int("prompt_cache_hit_tokens")
+        ?: 0,
 )
 
 /** Test-friendly entry point: parses a recorded SSE document into events. */

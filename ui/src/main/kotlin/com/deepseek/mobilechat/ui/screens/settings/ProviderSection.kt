@@ -116,11 +116,15 @@ internal fun ProviderSection(
             HintText("支持 OpenAI 兼容、Anthropic、Gemini 三种协议。API Key 只写入本机密钥库，不落数据库。")
         }
         providers.forEach { profile ->
-            // The balance endpoint exists only for OpenRouter-compatible
-            // profiles; predicting it keeps a button that can only fail off
-            // the screen. Unsupported at runtime still hides it for the session.
+            // Only the vendors whose API actually exposes a credit/balance
+            // endpoint get the button: OpenRouter and DeepSeek. Predicting it
+            // keeps a button that can only fail off the screen; an unexpected
+            // Unsupported at runtime still hides it for the session.
             val balanceSupported = profile.protocol == ProviderProtocol.OPENAI_COMPATIBLE &&
-                profile.baseUrl.contains("openrouter", ignoreCase = true)
+                (
+                    profile.baseUrl.contains("openrouter", ignoreCase = true) ||
+                        profile.baseUrl.contains("deepseek", ignoreCase = true)
+                    )
             ProviderRow(
                 profile = profile,
                 balance = balanceText[profile.id.raw],

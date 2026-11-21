@@ -9,16 +9,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -184,6 +188,30 @@ fun ChatScreen(
         }
     }
 
+    // The transcript re-emits on every streamed token, so this screen recomposes
+    // per token too. These callbacks are part of `ChatMessageList`'s parameter
+    // set: if a new lambda instance were handed down each time, no row could ever
+    // be skipped and the whole list would recompose on every token. They capture
+    // only the ViewModel and remembered state holders, and they address messages
+    // by id — so a change to a streaming message's text cannot invalidate them.
+    val transcriptOnRequestActions: (MessageId) -> Unit = remember(focusManager, keyboard) {
+        { id: MessageId ->
+            focusManager.clearFocus()
+            keyboard?.hide()
+            panel = ChatPanel.Actions(id)
+        }
+    }
+    val transcriptOnCancelEdit: () -> Unit = remember { { editingMessage = null } }
+    val transcriptOnSaveEdit: (MessageId, String) -> Unit = remember(viewModel) {
+        { id, text ->
+            editingMessage = null
+            viewModel.edit(id, text)
+        }
+    }
+    val transcriptOnSwitchBranch: (MessageId) -> Unit = remember(viewModel) { viewModel::switchBranch }
+    val transcriptOnRetry: (MessageId) -> Unit = remember(viewModel) { viewModel::retry }
+    val transcriptOnContinue: (MessageId) -> Unit = remember(viewModel) { viewModel::continueGeneration }
+
     CompositionLocalProvider(
         LocalAttachmentResolver provides { id -> services.attachmentStore.get(id) },
     ) {
@@ -239,17 +267,12 @@ fun ChatScreen(
                                 protocol = state.activeModel.protocol,
                                 activeProviderId = state.activeModel.ref?.providerId,
                                 thinkingSeconds = state.thinkingSeconds,
-                                onRequestActions = { message ->
-                                    openPanel(ChatPanel.Actions(message.id))
-                                },
-                                onCancelEdit = { editingMessage = null },
-                                onSaveEdit = { id, text ->
-                                    editingMessage = null
-                                    viewModel.edit(id, text)
-                                },
-                                onSwitchBranch = viewModel::switchBranch,
-                                onRetry = viewModel::retry,
-                                onContinue = viewModel::continueGeneration,
+                                onRequestActions = transcriptOnRequestActions,
+                                onCancelEdit = transcriptOnCancelEdit,
+                                onSaveEdit = transcriptOnSaveEdit,
+                                onSwitchBranch = transcriptOnSwitchBranch,
+                                onRetry = transcriptOnRetry,
+                                onContinue = transcriptOnContinue,
                             )
                         }
                     }
@@ -261,6 +284,10 @@ fun ChatScreen(
                             .align(Alignment.BottomCenter)
                             .padding(horizontal = Spacing.md, vertical = Spacing.sm),
                     )
+                }
+
+                if (state.needsReply && !state.isBusy) {
+                    NeedsReplyBar(onGenerate = viewModel::generateReply)
                 }
 
                 ChatComposer(
@@ -333,6 +360,32 @@ fun ChatScreen(
             onForkMessage = viewModel::switchBranch,
             onDeleteMessage = viewModel::delete,
         )
+    }
+}
+
+/**
+ * Explicit recovery for a branch whose active leaf is an unanswered user
+ * message. Shown only for that shape; it never generates by itself, because
+ * opening a conversation must not spend tokens without a gesture.
+ */
+@Composable
+private fun NeedsReplyBar(onGenerate: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.lg, vertical = Spacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        Text(
+            text = "这条分支还没有回复",
+            style = MaterialTheme.typography.labelMedium,
+            color = LocalChatColors.current.mutedText,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onGenerate) {
+            Text("生成回复", style = MaterialTheme.typography.labelLarge)
+        }
     }
 }
 

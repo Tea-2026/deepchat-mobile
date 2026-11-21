@@ -27,7 +27,7 @@ class GeminiParsingTest {
 
         data: {"candidates":[{"content":{"parts":[{"text":"considering","thought":true}]}}]}
 
-        data: {"candidates":[{"content":{"parts":[{"text":" world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":9,"thoughtsTokenCount":3}}
+        data: {"candidates":[{"content":{"parts":[{"text":" world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":9,"thoughtsTokenCount":3,"cachedContentTokenCount":2}}
 
     """.trimIndent()
 
@@ -43,7 +43,13 @@ class GeminiParsingTest {
                 GenerationEvent.ReasoningDelta("considering"),
                 GenerationEvent.TextDelta(" world"),
                 GenerationEvent.UsageReport(
-                    Usage(promptTokens = 5, completionTokens = 9, reasoningTokens = 3),
+                    Usage(
+                        promptTokens = 5,
+                        completionTokens = 9,
+                        reasoningTokens = 3,
+                        // Cached prompt tokens are a discounted slice of the prompt.
+                        cachedPromptTokens = 2,
+                    ),
                 ),
                 GenerationEvent.Finished(FinishReason.STOP),
             ),

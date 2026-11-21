@@ -574,6 +574,37 @@ fun PlusIcon(
     }
 }
 
+/** Three bars on a baseline — the usage/spend entry in the drawer. */
+@Composable
+fun ChartIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+    contentDescription: String? = "用量与花费",
+) {
+    IconBox(modifier, tint, contentDescription) {
+        val baseline = 18.5f
+        line(tint, 4f, baseline, 20f, baseline)
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(5.5f, 12f),
+            size = Size(3f, 6.5f),
+            cornerRadius = CornerRadius(1f),
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(10.5f, 7.5f),
+            size = Size(3f, 11f),
+            cornerRadius = CornerRadius(1f),
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(15.5f, 10f),
+            size = Size(3f, 8.5f),
+            cornerRadius = CornerRadius(1f),
+        )
+    }
+}
+
 /** Gear: eight spokes around a ring — the settings entry. */
 @Composable
 fun GearIcon(

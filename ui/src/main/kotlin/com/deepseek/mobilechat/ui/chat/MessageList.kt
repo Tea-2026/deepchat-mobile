@@ -1,7 +1,5 @@
 package com.deepseek.mobilechat.ui.chat
 
-import androidx.compose.foundation.gestures.animateScrollBy
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,13 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -38,18 +30,19 @@ import com.deepseek.mobilechat.ui.motion.MotionVisibility
 import com.deepseek.mobilechat.ui.motion.messageEnter
 import com.deepseek.mobilechat.ui.motion.pressable
 import com.deepseek.mobilechat.ui.theme.Spacing
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.launch
 
 /**
  * The transcript.
  *
  * Scrolling rules that matter for a streaming chat:
- *  - new messages animate to the bottom;
- *  - streaming text growth keeps the view pinned to the bottom, but only while
- *    the user has not scrolled away;
+ *  - the view stays pinned to the bottom while the user has not scrolled away;
  *  - the moment the user drags, auto-follow stops, and it resumes only after
- *    they come back to the bottom themselves (or tap the jump button).
+ *    they are back at the bottom themselves (or tap the jump button).
+ *
+ * All of that is implemented by exactly one follower: [rememberTailFollow]. No
+ * other effect in this file touches [listState] — the previous version had two
+ * of them racing over the same scroll mutex, which is what made the list twitch
+ * (the full mechanism is written up in `AutoFollow.kt`).
  *
  * Items are keyed by *parent*, not by message id: a regenerated reply replaces
  * its sibling in the same slot, which is what lets the row cross-slide between
@@ -65,7 +58,7 @@ fun ChatMessageList(
     protocol: ProviderProtocol?,
     activeProviderId: ProviderId?,
     thinkingSeconds: Map<MessageId, Int>,
-    onRequestActions: (Message) -> Unit,
+    onRequestActions: (MessageId) -> Unit,
     onCancelEdit: () -> Unit,
     onSaveEdit: (MessageId, String) -> Unit,
     onSwitchBranch: (MessageId) -> Unit,
@@ -79,60 +72,20 @@ fun ChatMessageList(
     LaunchedEffect(messages) {
         messages.forEach { archive[it.id] = it }
     }
+    // One stable lookup for every row: a lambda rebuilt per row (and therefore
+    // per re-composition) would make every `MessageRow` non-skippable.
+    val resolveMessage: (MessageId) -> Message? = remember(archive) { { id -> archive[id] } }
 
     // v2: a message fades + lifts 4dp the first time it is ever shown, and
     // never again — scrolling a message back into view must not replay it.
-    val arrived = remember { mutableSetOf<MessageId>() }
+    val arrived = remember { HashSet<MessageId>() }
 
-    var autoFollow by remember { mutableStateOf(true) }
-    var programmatic by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+    val tail = rememberTailFollow(listState)
 
-    val atBottom by remember(listState) {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            last.index >= info.totalItemsCount - 1 &&
-                last.offset + last.size <= info.viewportEndOffset + 4
-        }
-    }
-
-    LaunchedEffect(atBottom) {
-        if (atBottom) autoFollow = true
-    }
-
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
-            // A scroll the user started wins over the auto-follow loop.
-            if (scrolling && !programmatic) autoFollow = false
-        }
-    }
-
-    val streamingLength = messages.lastOrNull()
-        ?.takeIf { it.status == MessageStatus.STREAMING }
-        ?.text
-        ?.length ?: 0
-
-    LaunchedEffect(messages.lastOrNull()?.id) {
-        if (messages.isNotEmpty() && autoFollow) {
-            programmatic = true
-            try {
-                listState.animateToBottom()
-            } finally {
-                programmatic = false
-            }
-        }
-    }
-
-    LaunchedEffect(streamingLength) {
-        if (autoFollow && streamingLength > 0) {
-            programmatic = true
-            try {
-                listState.snapToBottom()
-            } finally {
-                programmatic = false
-            }
-        }
+    // Hoisted so the LazyColumn item provider does not get a fresh key function
+    // on every recomposition of this composable.
+    val keyOf: (Message) -> Any = remember {
+        { message: Message -> slotKey(message) }
     }
 
     Box(modifier = modifier) {
@@ -143,36 +96,68 @@ fun ChatMessageList(
         ) {
             items(
                 items = messages,
-                key = { message -> slotKey(message) },
+                key = keyOf,
             ) { message ->
+                val streaming = message.status == MessageStatus.STREAMING
+
                 val firstAppearance = remember(message.id) { arrived.add(message.id) }
                 val entrance = if (firstAppearance) {
                     Modifier.messageEnter(key = message.id)
                 } else {
                     Modifier
                 }
+
+                // `animateItem()` animates *placement* deltas between layouts. On
+                // the streaming row the height changes on every token while the
+                // follower is moving the scroll offset, and Compose only disables
+                // that animation pass for its own `animateScrollToItem` (via
+                // `skipItemPlacementAnimation`), which we no longer use. A row
+                // that is still being written has nothing to animate: gate the
+                // item animation on the message being finished.
+                val itemAnimation = remember(streaming) {
+                    if (streaming) Modifier else Modifier.animateItem()
+                }
+
+                // Per-row callbacks must survive the token that changes
+                // `message.text`; they are keyed on the *id*, which does not.
+                val requestActions = remember(message.id, onRequestActions) {
+                    { onRequestActions(message.id) }
+                }
+                val saveEdit = remember(message.id, onSaveEdit) {
+                    { text: String -> onSaveEdit(message.id, text) }
+                }
+                val retry = remember(message.id, onRetry) {
+                    { onRetry(message.id) }
+                }
+                val continueGeneration = remember(message.id, onContinue) {
+                    { onContinue(message.id) }
+                }
+
                 MessageRow(
                     message = message,
                     branch = branches[message.id],
-                    resolveMessage = { id -> archive[id] },
+                    resolveMessage = resolveMessage,
                     modelName = modelName,
                     protocol = protocol,
                     thinkingSeconds = thinkingSeconds[message.id],
                     activeProviderId = activeProviderId,
                     editing = editing == message.id,
-                    onRequestActions = { onRequestActions(message) },
+                    onRequestActions = requestActions,
                     onCancelEdit = onCancelEdit,
-                    onSaveEdit = { text -> onSaveEdit(message.id, text) },
+                    onSaveEdit = saveEdit,
                     onSwitchBranch = onSwitchBranch,
-                    onRetry = { onRetry(message.id) },
-                    onContinue = { onContinue(message.id) },
-                    modifier = Modifier.animateItem().then(entrance),
+                    onRetry = retry,
+                    onContinue = continueGeneration,
+                    modifier = itemAnimation.then(entrance),
                 )
             }
         }
 
+        // Driven by the follower's detached state, not by the raw distance to the
+        // bottom: while following, the distance is non-zero for a frame after
+        // every token, and reading it here reversed this transition per token.
         MotionVisibility(
-            visible = !atBottom,
+            visible = tail.isDetached,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = Spacing.md),
@@ -180,18 +165,7 @@ fun ChatMessageList(
             exit = Motion.exitToBottom(),
             label = "jumpToBottom",
         ) {
-            JumpToBottomButton(
-                onClick = {
-                    scope.launch {
-                        programmatic = true
-                        try {
-                            listState.animateToBottom()
-                        } finally {
-                            programmatic = false
-                        }
-                    }
-                },
-            )
+            JumpToBottomButton(onClick = tail.jumpToBottom)
         }
     }
 }
@@ -222,26 +196,4 @@ private fun JumpToBottomButton(onClick: () -> Unit) {
             )
         }
     }
-}
-
-/** Scrolls the list so the *bottom* of the last item meets the viewport. */
-private suspend fun LazyListState.snapToBottom() {
-    val info = layoutInfo
-    if (info.totalItemsCount == 0) return
-    scrollToItem(info.totalItemsCount - 1)
-    val after = layoutInfo
-    val last = after.visibleItemsInfo.lastOrNull() ?: return
-    val delta = last.offset + last.size - (after.viewportEndOffset - after.afterContentPadding)
-    if (delta > 0) scrollBy(delta.toFloat())
-}
-
-/** Same, but animated — used when a whole message appears or disappears. */
-private suspend fun LazyListState.animateToBottom() {
-    val info = layoutInfo
-    if (info.totalItemsCount == 0) return
-    animateScrollToItem(info.totalItemsCount - 1)
-    val after = layoutInfo
-    val last = after.visibleItemsInfo.lastOrNull() ?: return
-    val delta = last.offset + last.size - (after.viewportEndOffset - after.afterContentPadding)
-    if (delta > 0) animateScrollBy(delta.toFloat())
 }

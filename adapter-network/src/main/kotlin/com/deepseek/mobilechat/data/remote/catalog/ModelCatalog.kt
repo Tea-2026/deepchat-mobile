@@ -10,6 +10,7 @@ import com.deepseek.mobilechat.data.remote.http.ProviderHttpException
 import com.deepseek.mobilechat.data.remote.http.guardedHttp
 import com.deepseek.mobilechat.data.remote.http.requireSuccess
 import com.deepseek.mobilechat.data.remote.provider.arr
+import com.deepseek.mobilechat.data.remote.provider.bool
 import com.deepseek.mobilechat.data.remote.provider.double
 import com.deepseek.mobilechat.data.remote.provider.geminiApiBase
 import com.deepseek.mobilechat.data.remote.provider.joinUrl
@@ -68,40 +69,103 @@ class ModelCatalog(
 
     override suspend fun balance(profile: ProviderProfile): BalanceResult =
         withContext(Dispatchers.IO) {
-            if (profile.protocol != ProviderProtocol.OPENAI_COMPATIBLE ||
-                !profile.baseUrl.contains("openrouter", ignoreCase = true)
-            ) {
-                return@withContext BalanceResult.Unsupported
-            }
-            val apiKey = when (val secret = readSecret(secrets, profile.secretRef, "OpenRouter API key")) {
-                is Outcome.Ok -> secret.value
-                is Outcome.Err -> return@withContext BalanceResult.Failed(secret.error)
-            }
-            val result = guardedHttp {
-                val response = http.execute(
-                    method = "GET",
-                    url = openRouterCreditsUrl(profile.baseUrl),
-                    headers = mapOf(
-                        "Authorization" to "Bearer $apiKey",
-                        "Accept" to "application/json",
-                    ),
-                )
-                response.requireSuccess()
-                val body = response.use { it.bodyLines.joinToString("\n") }
-                parseOpenRouterCredits(body)
-                    ?: throw ProviderHttpException(
-                        AppError.ProviderProtocol("unexpected OpenRouter /credits payload"),
-                    )
-            }
-            when (result) {
-                is Outcome.Ok -> BalanceResult.Available(
-                    amount = result.value.remaining,
-                    currency = "USD",
-                    label = "OpenRouter credits",
-                )
-                is Outcome.Err -> BalanceResult.Failed(result.error)
+            when (balanceFlavour(profile)) {
+                BalanceFlavour.UNSUPPORTED -> BalanceResult.Unsupported
+                BalanceFlavour.OPENROUTER -> openRouterBalance(profile)
+                BalanceFlavour.DEEPSEEK -> deepSeekBalance(profile)
             }
         }
+
+    /**
+     * OpenRouter exposes `/credits` next to `/chat/completions`. The endpoint
+     * reports total and used credits, so the remaining amount is computed
+     * rather than read from a field.
+     */
+    private suspend fun openRouterBalance(profile: ProviderProfile): BalanceResult {
+        val apiKey = when (val secret = readSecret(secrets, profile.secretRef, "OpenRouter API key")) {
+            is Outcome.Ok -> secret.value
+            is Outcome.Err -> return BalanceResult.Failed(secret.error)
+        }
+        val result = guardedHttp {
+            val response = http.execute(
+                method = "GET",
+                url = openRouterCreditsUrl(profile.baseUrl),
+                headers = mapOf(
+                    "Authorization" to "Bearer $apiKey",
+                    "Accept" to "application/json",
+                ),
+            )
+            response.requireSuccess()
+            val body = response.use { it.bodyLines.joinToString("\n") }
+            parseOpenRouterCredits(body)
+                ?: throw ProviderHttpException(
+                    AppError.ProviderProtocol("unexpected OpenRouter /credits payload"),
+                )
+        }
+        return when (result) {
+            is Outcome.Ok -> BalanceResult.Available(
+                amount = result.value.remaining,
+                currency = "USD",
+                label = "OpenRouter credits",
+            )
+            is Outcome.Err -> BalanceResult.Failed(result.error)
+        }
+    }
+
+    /**
+     * DeepSeek reports a prepaid balance per currency. A profile that is
+     * reachable but has an empty `balance_infos` has no number to show, so it
+     * is a protocol failure — never a fabricated zero.
+     */
+    private suspend fun deepSeekBalance(profile: ProviderProfile): BalanceResult {
+        val apiKey = when (val secret = readSecret(secrets, profile.secretRef, "DeepSeek API key")) {
+            is Outcome.Ok -> secret.value
+            is Outcome.Err -> return BalanceResult.Failed(secret.error)
+        }
+        val result = guardedHttp {
+            val response = http.execute(
+                method = "GET",
+                url = deepSeekBalanceUrl(profile.baseUrl),
+                headers = mapOf(
+                    "Authorization" to "Bearer $apiKey",
+                    "Accept" to "application/json",
+                ),
+            )
+            response.requireSuccess()
+            val body = response.use { it.bodyLines.joinToString("\n") }
+            parseDeepSeekBalance(body)
+                ?: throw ProviderHttpException(
+                    AppError.ProviderProtocol("unexpected DeepSeek /user/balance payload"),
+                )
+        }
+        return when (result) {
+            is Outcome.Ok -> {
+                val balance = result.value
+                BalanceResult.Available(
+                    amount = balance.amount,
+                    currency = balance.currency,
+                    // A zero/negative balance is still the real balance; the
+                    // label carries the "not usable" part instead of hiding it.
+                    label = if (balance.isAvailable) "余额" else "余额（不可用）",
+                )
+            }
+            is Outcome.Err -> BalanceResult.Failed(result.error)
+        }
+    }
+}
+
+/** Which balance endpoint, if any, a profile supports. */
+internal enum class BalanceFlavour { UNSUPPORTED, OPENROUTER, DEEPSEEK }
+
+internal fun balanceFlavour(profile: ProviderProfile): BalanceFlavour = when {
+    profile.protocol == ProviderProtocol.OPENAI_COMPATIBLE &&
+        profile.baseUrl.contains("openrouter", ignoreCase = true) -> BalanceFlavour.OPENROUTER
+
+    // DeepSeek keeps `/user/balance` outside both the `/v1` and `/anthropic`
+    // base-URL shapes, so only the host matters (the key is the same either way).
+    profile.baseUrl.contains("deepseek", ignoreCase = true) -> BalanceFlavour.DEEPSEEK
+
+    else -> BalanceFlavour.UNSUPPORTED
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +213,24 @@ internal fun openRouterCreditsUrl(baseUrl: String): String {
     val trimmed = baseUrl.trimEnd('/')
     return if (trimmed.contains("/api/v1", ignoreCase = true)) "$trimmed/credits"
     else "$trimmed/api/v1/credits"
+}
+
+/**
+ * `https://api.deepseek.com/user/balance` for every documented base-URL shape:
+ * `https://api.deepseek.com`, `.../`, `.../v1` and `.../anthropic` all map to
+ * the same endpoint (the `/v1` suffix is only an OpenAI-compatibility alias and
+ * `/anthropic` is the chat path, neither is part of the balance route).
+ */
+internal fun deepSeekBalanceUrl(baseUrl: String): String {
+    var root = baseUrl.trim().trimEnd('/')
+    while (true) {
+        root = when {
+            root.endsWith("/v1") -> root.removeSuffix("/v1")
+            root.endsWith("/anthropic") -> root.removeSuffix("/anthropic")
+            else -> break
+        }
+    }
+    return "$root/user/balance"
 }
 
 // ---------------------------------------------------------------------------
@@ -224,4 +306,32 @@ internal fun parseOpenRouterCredits(json: String): OpenRouterCredits? {
         ?: data.double("used_credits")
         ?: 0.0
     return OpenRouterCredits(totalCredits = total, usedCredits = used)
+}
+
+internal data class DeepSeekBalance(
+    val isAvailable: Boolean,
+    val amount: Double,
+    val currency: String,
+)
+
+/**
+ * DeepSeek: `{"is_available":true,"balance_infos":[{"currency":"CNY",
+ * "total_balance":"110.00", …}]}`.
+ *
+ * The amounts are quoted as decimal strings. A CNY entry is preferred when the
+ * account reports several currencies; an empty `balance_infos` is `null`
+ * (nothing to report), not a zero balance.
+ */
+internal fun parseDeepSeekBalance(json: String): DeepSeekBalance? {
+    val root = parseJsonObject(json) ?: return null
+    val infos = root.arr("balance_infos")?.mapNotNull { it.objOrNull() }.orEmpty()
+    if (infos.isEmpty()) return null
+    val info = infos.firstOrNull { it.str("currency").equals("CNY", ignoreCase = true) }
+        ?: infos.first()
+    val amount = info.str("total_balance")?.trim()?.toDoubleOrNull() ?: return null
+    return DeepSeekBalance(
+        isAvailable = root.bool("is_available") ?: true,
+        amount = amount,
+        currency = info.str("currency")?.takeIf { it.isNotBlank() } ?: "CNY",
+    )
 }

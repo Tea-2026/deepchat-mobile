@@ -42,8 +42,16 @@ class FakeSearchPort(private val response: SearchResponse = SearchResponse("", e
 
     val queries = mutableListOf<String>()
 
+    var configured: Boolean = true
+
+    /** When set, [search] fails with this error instead of returning [response]. */
+    var failure: AppError? = null
+
+    override suspend fun isConfigured(): Boolean = configured
+
     override suspend fun search(query: String, options: SearchOptions): Outcome<SearchResponse> {
         queries += query
+        failure?.let { return Outcome.Err(it) }
         return Outcome.Ok(response.copy(query = query))
     }
 }

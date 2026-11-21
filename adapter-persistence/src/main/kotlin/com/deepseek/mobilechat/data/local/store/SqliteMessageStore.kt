@@ -29,6 +29,15 @@ import kotlinx.coroutines.withContext
  *
  * `conversation_id` and `created_at` are immutable after append, so [update]
  * rewrites only the mutable columns.
+ *
+ * Since schema v3 the denormalised spend columns (`usage_prompt_tokens`,
+ * `usage_cached_tokens`, `usage_completion_tokens`, `usage_cost_cny`,
+ * `model_id`, `provider_id`) are written in the same statement as
+ * `usage_json` / `model_info_json`. They exist only so the usage aggregate
+ * store (`SqliteUsageAggregateStore`) can sum spend in SQL; the JSON columns
+ * stay the source of truth for the domain object, which is why the read path
+ * does not select them. Every write goes through [append] or [update], and the
+ * streaming checkpoint path is an [update], so both stay in sync.
  */
 class SqliteMessageStore(
     private val db: Db,
@@ -52,8 +61,10 @@ class SqliteMessageStore(
                 """
                 INSERT INTO messages
                     (id, conversation_id, parent_id, seq, role, status, parts_json, plain_text,
-                     created_at, edited_at, pinned, model_info_json, usage_json, finish_reason, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, edited_at, pinned, model_info_json, usage_json, finish_reason, error,
+                     usage_prompt_tokens, usage_cached_tokens, usage_completion_tokens,
+                     usage_cost_cny, model_id, provider_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
                 listOf<Any?>(message.id.raw) + argumentList(message),
             )
@@ -68,7 +79,9 @@ class SqliteMessageStore(
                 UPDATE messages
                 SET parent_id = ?, seq = ?, role = ?, status = ?, parts_json = ?, plain_text = ?,
                     edited_at = ?, pinned = ?, model_info_json = ?, usage_json = ?,
-                    finish_reason = ?, error = ?
+                    finish_reason = ?, error = ?,
+                    usage_prompt_tokens = ?, usage_cached_tokens = ?, usage_completion_tokens = ?,
+                    usage_cost_cny = ?, model_id = ?, provider_id = ?
                 WHERE id = ?
                 """.trimIndent(),
                 listOf(
@@ -84,8 +97,7 @@ class SqliteMessageStore(
                     message.usage?.let(JsonCodecs::encodeUsage),
                     message.finishReason?.name,
                     message.error,
-                    message.id.raw,
-                ),
+                ) + usageColumns(message) + message.id.raw,
             )
             bus.notifyChanged()
         }
@@ -163,6 +175,25 @@ class SqliteMessageStore(
         message.usage?.let(JsonCodecs::encodeUsage),
         message.finishReason?.name,
         message.error,
+    ) + usageColumns(message)
+
+    /**
+     * The v3 denormalised columns, in the order they are declared.
+     *
+     * `usage == null` writes six NULLs, which the aggregate store reads as "no
+     * usage reported". A usage whose `cost` is null still writes its token
+     * counts and a NULL cost, so the tokens are counted while the money
+     * contributes 0.0. `modelInfo == null` leaves the model attribution NULL,
+     * which keeps the message out of the per-model breakdown (it still appears
+     * in the day totals).
+     */
+    private fun usageColumns(message: Message): List<Any?> = listOf(
+        message.usage?.promptTokens,
+        message.usage?.cachedPromptTokens,
+        message.usage?.completionTokens,
+        message.usage?.cost,
+        message.modelInfo?.ref?.modelId?.raw,
+        message.modelInfo?.ref?.providerId?.raw,
     )
 
     private inline fun <reified E : Enum<E>> parseEnum(value: String?, field: String, messageId: String): E {
@@ -175,6 +206,11 @@ class SqliteMessageStore(
     }
 
     private companion object {
+        /**
+         * Read projection. The v3 usage columns are deliberately absent: the
+         * domain object is rebuilt from `usage_json` / `model_info_json`, so
+         * selecting the copies as well would only widen every row.
+         */
         const val COLUMNS =
             "id, conversation_id, parent_id, seq, role, status, parts_json, plain_text, " +
                 "created_at, edited_at, pinned, model_info_json, usage_json, finish_reason, error"

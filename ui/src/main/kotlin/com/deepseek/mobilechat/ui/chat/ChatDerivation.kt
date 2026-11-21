@@ -17,20 +17,34 @@ import com.deepseek.mobilechat.domain.ThinkingLevel
 /**
  * Messages on the conversation's active path, in display order.
  *
- * Falls back to chronological order when the leaf is not written yet (first
- * turn) or when a store can only hand back a flat list — a flat transcript is
- * still better than an empty screen.
+ * The conversation aggregate is required: without it there is no active leaf,
+ * so the only candidate list is *every* message of the conversation — branches
+ * included. The transcript keys its rows by parent (`ChatMessageList.slotKey`),
+ * so two siblings share one key and Compose throws "Key … was already used".
+ * That is why a missing aggregate returns an empty list (the screen shows
+ * `isLoadingConversation`) instead of a flat fallback.
+ *
+ * When the aggregate is present but its leaf is not in the tree yet (a stale
+ * aggregate racing a fresh emission, e.g. right after a branch delete), the
+ * chronological fallback is kept **only** for a list that can be keyed: one
+ * message per parent slot. A branched history cannot be flattened into rows
+ * without a duplicated key, so it waits for the repaired aggregate instead.
  */
 internal fun visibleMessages(
     tree: MessageTree,
     conversation: Conversation?,
     all: List<Message>,
 ): List<Message> {
-    val path = tree.pathTo(conversation?.activeLeafId)
-    return if (path.isEmpty()) {
+    if (conversation == null) return emptyList()
+    val path = tree.pathTo(conversation.activeLeafId)
+    if (path.isNotEmpty()) return path
+    // `slotKey` is "child-of:<parentId>" for every non-root row, so a list is
+    // renderable only when no two messages share a parent.
+    val parents = all.mapNotNull { it.parentId }
+    return if (parents.size == parents.distinct().size) {
         all.sortedWith(compareBy({ it.seq }, { it.createdAt }))
     } else {
-        path
+        emptyList()
     }
 }
 
@@ -68,6 +82,20 @@ internal fun buildBranches(
 internal fun describeModel(modelName: String, thinking: ThinkingLevel): String {
     val name = modelName.takeIf { it.isNotBlank() } ?: "默认模型"
     return "$name · 思考 ${thinkingLabel(thinking)}"
+}
+
+/**
+ * True when the active branch ends at a user message with no reply.
+ *
+ * Forks created before fork edits generated a reply, and forks whose generation
+ * failed, are exactly this shape. The UI uses it to offer an explicit
+ * 「生成回复」 action instead of silently generating whenever the conversation is
+ * opened (which would spend tokens without a user gesture).
+ */
+internal fun leafNeedsReply(tree: MessageTree, conversation: Conversation?): Boolean {
+    val leafId = conversation?.activeLeafId ?: return false
+    val leaf = tree.message(leafId) ?: return false
+    return leaf.role == MessageRole.USER && tree.isLeaf(leafId)
 }
 
 /**

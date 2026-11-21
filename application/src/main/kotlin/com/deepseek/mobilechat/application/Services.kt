@@ -16,6 +16,7 @@ import com.deepseek.mobilechat.domain.PresetId
 import com.deepseek.mobilechat.domain.ProviderId
 import com.deepseek.mobilechat.domain.ProviderProfile
 import com.deepseek.mobilechat.domain.SamplingParams
+import com.deepseek.mobilechat.domain.SearchHit
 import com.deepseek.mobilechat.domain.TagId
 import com.deepseek.mobilechat.domain.ThinkingLevel
 import com.deepseek.mobilechat.domain.FolderId
@@ -43,6 +44,12 @@ interface ChatService {
         text: String,
         attachmentIds: List<AttachmentId> = emptyList(),
         ephemeralInjection: String? = null,
+        /**
+         * Web results that were injected into this turn. They are stored on the
+         * user message as a [com.deepseek.mobilechat.domain.MessagePart.SearchResults]
+         * part so the answer can still show its sources after a restart.
+         */
+        searchHits: List<SearchHit> = emptyList(),
     ): Outcome<SendResult>
 
     suspend fun regenerate(messageId: MessageId): Outcome<Unit>
@@ -57,7 +64,13 @@ interface ChatService {
 
     suspend fun cancel(conversationId: ConversationId): Outcome<Unit>
 
-    /** Only legal after [com.deepseek.mobilechat.domain.FinishReason.LENGTH]. */
+    /**
+     * Extends an assistant turn that stopped before a natural end: a
+     * [com.deepseek.mobilechat.domain.FinishReason.LENGTH] truncation, or a
+     * turn left interrupted/cancelled/errored (`CANCELLED` / `FAILED`).
+     * The message is appended to in place; a completed natural reply is still
+     * rejected.
+     */
     suspend fun continueGeneration(messageId: MessageId): Outcome<Unit>
 
     suspend fun setPinned(messageId: MessageId, pinned: Boolean): Outcome<Unit>
@@ -193,4 +206,51 @@ interface GenerationQueue {
     fun pause()
     fun resume()
     suspend fun cancel(conversationId: ConversationId)
+}
+
+// ---------------------------------------------------------------------------
+// Usage / spend
+// ---------------------------------------------------------------------------
+
+/**
+ * Token and money totals. [costCny] is an estimate and is always in CNY: a
+ * provider that quotes in USD is converted when the price is resolved, so no
+ * caller ever has to know which one it is talking about.
+ */
+data class UsageTotals(
+    val promptTokens: Long = 0,
+    val cachedPromptTokens: Long = 0,
+    val completionTokens: Long = 0,
+    val costCny: Double = 0.0,
+    val messageCount: Int = 0,
+) {
+    val totalTokens: Long get() = promptTokens + completionTokens
+
+    operator fun plus(other: UsageTotals): UsageTotals = UsageTotals(
+        promptTokens = promptTokens + other.promptTokens,
+        cachedPromptTokens = cachedPromptTokens + other.cachedPromptTokens,
+        completionTokens = completionTokens + other.completionTokens,
+        costCny = costCny + other.costCny,
+        messageCount = messageCount + other.messageCount,
+    )
+}
+
+data class UsageDay(val dayStartMillis: Long, val totals: UsageTotals)
+
+data class UsageByModel(val providerId: String, val modelId: String, val totals: UsageTotals)
+
+/** Everything the usage page needs, assembled in one pass. */
+data class UsageReport(
+    val windowDays: Int,
+    val totals: UsageTotals,
+    /** Oldest day first, with empty days already filled in for the chart. */
+    val days: List<UsageDay>,
+    /** Costliest model first. */
+    val byModel: List<UsageByModel>,
+)
+
+interface UsageService {
+    suspend fun report(windowDays: Int = 30): Outcome<UsageReport>
+
+    suspend fun conversationTotals(conversationId: ConversationId): UsageTotals
 }

@@ -8,9 +8,11 @@ import com.deepseek.mobilechat.data.remote.http.ProviderHttpException
 import com.deepseek.mobilechat.data.remote.sse.SseEvent
 import com.deepseek.mobilechat.data.remote.sse.SseParser
 import com.deepseek.mobilechat.application.Outcome
+import com.deepseek.mobilechat.application.PromptMessage
 import com.deepseek.mobilechat.application.SecretStore
 import com.deepseek.mobilechat.domain.AttachmentId
 import com.deepseek.mobilechat.domain.MessagePart
+import com.deepseek.mobilechat.domain.MessageRole
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.serialization.json.Json
@@ -123,6 +125,73 @@ internal fun MessagePart.asPromptText(): String? = when (this) {
 
 internal fun List<MessagePart>.visibleText(): String =
     mapNotNull { it.asPromptText() }.joinToString("\n").trim()
+
+// ---------------------------------------------------------------------------
+// History replay invariant
+// ---------------------------------------------------------------------------
+
+/**
+ * History replays only assistant turns the protocol can validate.
+ *
+ * This app persists [MessagePart.ToolCall] parts but has no tool loop: nothing
+ * ever executes a call, so no [MessagePart.ToolResult] is ever written. OpenAI
+ * compatible history requires one `role:"tool"` message per `tool_call_id` and
+ * Anthropic requires a matching `tool_result` block, so replaying an unanswered
+ * assistant tool-call turn makes the provider reject the whole request with
+ * `HTTP 400: Invalid assistant message: content or tool_calls must be set` —
+ * the exact failure behind "regenerate is broken". The same strict validation
+ * rejects an assistant turn with neither content nor tool calls, which is what
+ * an interrupted generation leaves behind before its first delta.
+ *
+ * Repair: unanswered tool calls are stripped from the outgoing turn, keeping
+ * its visible text so the model still sees what it already said. A turn with
+ * nothing replayable left (tool calls only, or an empty placeholder) is omitted
+ * entirely. The stored message is never mutated; only the request is repaired.
+ * The rule lives here, next to the wire builders, so OpenAI-compatible,
+ * Anthropic and Gemini all apply exactly the same invariant.
+ */
+internal fun List<PromptMessage>.replayableHistory(): List<PromptMessage> {
+    val answeredCallIds = buildSet {
+        this@replayableHistory.forEach { prompt ->
+            prompt.parts.filterIsInstance<MessagePart.ToolResult>().forEach { add(it.callId) }
+        }
+    }
+    return mapNotNull { prompt ->
+        if (prompt.role != MessageRole.ASSISTANT) prompt else prompt.replayableCopy(answeredCallIds)
+    }
+}
+
+private fun PromptMessage.replayableCopy(answeredCallIds: Set<String>): PromptMessage? {
+    val toolCalls = parts.filterIsInstance<MessagePart.ToolCall>()
+    if (toolCalls.isEmpty()) return takeIf { it.hasReplayableContent() }
+
+    val unansweredCallIds = toolCalls
+        .filter { it.callId !in answeredCallIds }
+        .mapTo(HashSet()) { it.callId }
+    if (unansweredCallIds.isEmpty()) return this
+
+    // Keep visible/answered content, drop only the calls no tool result answers.
+    val cleaned = copy(
+        parts = parts.filterNot { part ->
+            part is MessagePart.ToolCall && part.callId in unansweredCallIds
+        },
+    )
+    val hasAnsweredToolCall = cleaned.parts.any { it is MessagePart.ToolCall }
+    return cleaned.takeIf { hasAnsweredToolCall || it.hasReplayableContent() }
+}
+
+private fun PromptMessage.hasReplayableContent(): Boolean = parts.any { part ->
+    when (part) {
+        is MessagePart.Text -> part.text.isNotBlank()
+        is MessagePart.ContextBlock -> part.title.isNotBlank() || part.body.isNotBlank()
+        is MessagePart.SearchResults -> part.hits.isNotEmpty()
+        is MessagePart.Image, is MessagePart.FileRef -> true
+        // Reasoning is not content on the OpenAI wire by default, and unsigned
+        // thinking is dropped by Anthropic as well.
+        is MessagePart.Reasoning -> false
+        is MessagePart.ToolCall, is MessagePart.ToolResult -> false
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JSON helpers (manual parsing; no provider model classes)

@@ -65,6 +65,7 @@ internal fun SearchSourceSection(
         val cap = capability ?: return@LaunchedEffect
         savedRefs = SearchProviderKind.entries
             .map { searchSecretRef(it) }
+            .filter { it.isNotEmpty() }
             .filter { ref -> cap.secretStore.get(ref) != null }
             .toSet()
     }
@@ -100,57 +101,87 @@ internal fun SearchSourceSection(
         }
         SearchProviderKind.entries.forEach { kind ->
             val ref = searchSecretRef(kind)
-            val saved = ref in savedRefs
+            // Keyless sources reuse an existing credential (DeepSeek provider
+            // key) or need none at all; rendering a paste box for them would
+            // write a key nobody ever reads.
+            val keyless = ref.isEmpty()
+            val saved = ref.isNotEmpty() && ref in savedRefs
             Column(modifier = Modifier.padding(top = Spacing.xs)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(
-                        color = if (saved) MaterialTheme.colorScheme.primary else chatColors.mutedText.copy(alpha = 0.4f),
-                    )
-                    Spacer(Modifier.width(Spacing.xs))
-                    Text(
-                        text = "${searchProviderLabel(kind)} API Key",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Spacer(Modifier.width(Spacing.sm))
-                    Text(
-                        text = if (saved) "已保存" else "未保存",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = chatColors.mutedText,
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = drafts[kind].orEmpty(),
-                        onValueChange = { typed -> drafts = drafts + (kind to typed) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(top = Spacing.xxs),
-                        singleLine = true,
-                        placeholder = {
-                            Text(
-                                text = if (saved) "留空表示不修改" else "粘贴密钥",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = chatColors.mutedText,
-                            )
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                    )
-                    TextButton(
-                        enabled = drafts[kind].orEmpty().isNotBlank(),
-                        onClick = {
-                            val value = drafts[kind].orEmpty().trim()
-                            scope.launch {
-                                runCatching { capability.secretStore.put(ref, value) }
-                                    .onSuccess {
-                                        savedRefs = savedRefs + ref
-                                        drafts = drafts - kind
-                                        onMessage("已保存 ${searchProviderLabel(kind)} 密钥")
-                                    }
-                                    .onFailure { onMessage(it.message ?: "保存密钥失败") }
-                            }
-                        },
-                    ) { Text("保存") }
+                if (keyless) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(
+                            text = searchProviderLabel(kind),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.width(Spacing.sm))
+                        Text(
+                            text = if (kind == SearchProviderKind.DEEPSEEK) {
+                                "无需额外密钥，复用 DeepSeek 服务源"
+                            } else {
+                                "无需密钥"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = chatColors.mutedText,
+                        )
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(
+                            color = if (saved) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                chatColors.mutedText.copy(alpha = 0.4f)
+                            },
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(
+                            text = "${searchProviderLabel(kind)} API Key",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.width(Spacing.sm))
+                        Text(
+                            text = if (saved) "已保存" else "未保存",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = chatColors.mutedText,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = drafts[kind].orEmpty(),
+                            onValueChange = { typed -> drafts = drafts + (kind to typed) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(top = Spacing.xxs),
+                            singleLine = true,
+                            placeholder = {
+                                Text(
+                                    text = if (saved) "留空表示不修改" else "粘贴密钥",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = chatColors.mutedText,
+                                )
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                        )
+                        TextButton(
+                            enabled = drafts[kind].orEmpty().isNotBlank(),
+                            onClick = {
+                                val value = drafts[kind].orEmpty().trim()
+                                scope.launch {
+                                    runCatching { capability.secretStore.put(ref, value) }
+                                        .onSuccess {
+                                            savedRefs = savedRefs + ref
+                                            drafts = drafts - kind
+                                            onMessage("已保存 ${searchProviderLabel(kind)} 密钥")
+                                        }
+                                        .onFailure { onMessage(it.message ?: "保存密钥失败") }
+                                }
+                            },
+                        ) { Text("保存") }
+                    }
                 }
             }
         }

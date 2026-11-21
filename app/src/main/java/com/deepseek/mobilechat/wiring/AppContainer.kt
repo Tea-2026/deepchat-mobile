@@ -34,9 +34,13 @@ import com.deepseek.mobilechat.application.service.DefaultConversationService
 import com.deepseek.mobilechat.application.service.DefaultGenerationQueue
 import com.deepseek.mobilechat.application.service.DefaultPresetService
 import com.deepseek.mobilechat.application.service.DefaultProviderService
+import com.deepseek.mobilechat.application.UsageAggregateStore
+import com.deepseek.mobilechat.application.UsageService
 import com.deepseek.mobilechat.application.service.DefaultSearchService
+import com.deepseek.mobilechat.application.service.DefaultUsageService
 import com.deepseek.mobilechat.application.service.DefaultTransferService
 import com.deepseek.mobilechat.application.service.ModelCatalogCache
+import com.deepseek.mobilechat.application.service.StalledGenerationReconciler
 import com.deepseek.mobilechat.data.local.bus.ChangeBus
 import com.deepseek.mobilechat.data.local.db.AndroidDb
 import com.deepseek.mobilechat.data.local.db.AppDatabaseHelper
@@ -47,12 +51,15 @@ import com.deepseek.mobilechat.data.local.store.SqliteConversationStore
 import com.deepseek.mobilechat.data.local.store.SqliteFolderTagStore
 import com.deepseek.mobilechat.data.local.store.SqliteInjectionStore
 import com.deepseek.mobilechat.data.local.store.SqliteMessageStore
+import com.deepseek.mobilechat.data.local.store.SqliteUsageAggregateStore
 import com.deepseek.mobilechat.data.local.store.SqlitePresetStore
 import com.deepseek.mobilechat.data.local.store.SqliteProviderProfileStore
 import com.deepseek.mobilechat.data.remote.catalog.ModelCatalog
 import com.deepseek.mobilechat.data.remote.http.OkHttpHttpCaller
 import com.deepseek.mobilechat.data.remote.provider.RoutingChatCompletionPort
+import com.deepseek.mobilechat.data.remote.search.BingRssSearchAdapter
 import com.deepseek.mobilechat.data.remote.search.BraveSearchAdapter
+import com.deepseek.mobilechat.data.remote.search.DeepSeekWebSearchAdapter
 import com.deepseek.mobilechat.data.remote.search.SerperSearchAdapter
 import com.deepseek.mobilechat.data.remote.search.TavilySearchAdapter
 import com.deepseek.mobilechat.domain.AttachmentId
@@ -68,6 +75,7 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -94,6 +102,9 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
     private val tokenEstimator = HeuristicTokenEstimator()
     private val budgetLookup = ConstantModelBudgetLookup()
 
+    /** Owns startup-only work (database recovery) without blocking the first frame. */
+    private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override val clock: com.deepseek.mobilechat.application.ClockPort get() = systemClock
     override val settingsStore: SettingsStore get() = settings
     override val secretStore: com.deepseek.mobilechat.application.SecretStore get() = secrets
@@ -105,6 +116,10 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
         SqliteConversationStore(db, bus)
     }
     override val messageStore: MessageStore by lazy { SqliteMessageStore(db, bus) }
+
+    private val stalledGenerations by lazy {
+        StalledGenerationReconciler(conversationStore, messageStore)
+    }
     override val presetStore: PresetStore by lazy { SqlitePresetStore(db, bus) }
     override val providerStore: ProviderProfileStore by lazy {
         SqliteProviderProfileStore(db, bus)
@@ -152,6 +167,8 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
 
     private val searchAdapters: Map<SearchProviderKind, SearchPort> by lazy {
         mapOf(
+            SearchProviderKind.DEEPSEEK to DeepSeekWebSearchAdapter(providerStore, secrets, http),
+            SearchProviderKind.BING to BingRssSearchAdapter(http),
             SearchProviderKind.TAVILY to TavilySearchAdapter(secrets, http),
             SearchProviderKind.BRAVE to BraveSearchAdapter(secrets, http),
             SearchProviderKind.SERPER to SerperSearchAdapter(secrets, http),
@@ -215,6 +232,20 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
         )
     }
 
+    /**
+     * Settles assistant rows left `STREAMING` by the previous process death.
+     *
+     * The queue lives in memory, so nothing can be running at this point; an
+     * unfinished row is orphaned by definition. Runs on [startupScope] so
+     * opening SQLite never delays the first frame, and a recovery failure must
+     * not stop the app from launching.
+     */
+    fun reconcileStalledGenerations() {
+        startupScope.launch {
+            runCatching { stalledGenerations.reconcile() }
+        }
+    }
+
     override val context: ContextService by lazy {
         DefaultContextService(
             contextAssembler = contextAssembler,
@@ -253,6 +284,18 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
 
     override val search: SearchService by lazy {
         DefaultSearchService(searchAdapters, settings)
+    }
+
+    /**
+     * Spend aggregation. `SqliteUsageAggregateStore` reads the denormalised
+     * usage columns (schema v3) so the usage screen never walks message JSON.
+     */
+    private val usageAggregateStore: UsageAggregateStore by lazy {
+        SqliteUsageAggregateStore(db)
+    }
+
+    override val usage: UsageService by lazy {
+        DefaultUsageService(usageAggregateStore, systemClock)
     }
 
     override val transfer: TransferService by lazy {

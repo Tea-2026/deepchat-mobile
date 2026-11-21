@@ -2,7 +2,8 @@ package com.deepseek.mobilechat.application.service
 
 import com.deepseek.mobilechat.application.ModelCatalogPort
 import com.deepseek.mobilechat.application.Outcome
-import com.deepseek.mobilechat.application.pricing.BuiltinPricing
+import com.deepseek.mobilechat.application.pricing.Fx
+import com.deepseek.mobilechat.application.pricing.PriceBook
 import com.deepseek.mobilechat.domain.ModelDescriptor
 import com.deepseek.mobilechat.domain.ModelId
 import com.deepseek.mobilechat.domain.ProviderProfile
@@ -20,7 +21,7 @@ import kotlinx.coroutines.sync.withLock
  *    every streaming checkpoint. The first access per provider calls
  *    [ModelCatalogPort.listModels] and keeps the result for the process
  *    lifetime.
- * 2. [costUsd] turns a [Usage] into money using the descriptor's pricing, so
+ * 2. [costCny] turns a [Usage] into money using the descriptor's pricing, so
  *    every assistant message can persist an estimated cost.
  *
  * Failure contract: the catalog is an optimisation, never a hard dependency.
@@ -38,13 +39,29 @@ class ModelCatalogCache(private val catalog: ModelCatalogPort) {
         return models.firstOrNull { it.id == modelId }
     }
 
-    /** Cost in USD, or `null` when neither the catalog nor the offline table knows the model. */
-    fun costUsd(descriptor: ModelDescriptor?, usage: Usage): Double? {
+    /**
+     * Estimated cost in **CNY**, or `null` when neither the catalog nor the
+     * offline book knows the model.
+     *
+     * Cache hits are priced separately: they are the reason a long conversation
+     * costs a fraction of what a naive prompt-token count suggests. When the
+     * provider has no cache-hit rate, hits are charged as misses.
+     */
+    fun costCny(
+        descriptor: ModelDescriptor?,
+        usage: Usage,
+        atMillis: Long = System.currentTimeMillis(),
+    ): Double? {
         val pricing = descriptor?.pricing
-            ?: descriptor?.let { BuiltinPricing.lookup(it.id.raw) }
+            ?: descriptor?.let { PriceBook.lookup(it.id.raw, atMillis) }
             ?: return null
-        return (usage.promptTokens * pricing.inputPerMTokUsd +
-            usage.completionTokens * pricing.outputPerMTokUsd) / TOKENS_PER_MILLION
+        val cached = usage.cachedPromptTokens.coerceIn(0, usage.promptTokens)
+        val fresh = usage.promptTokens - cached
+        val cachedRate = pricing.cachedInputPerMTok ?: pricing.inputPerMTok
+        val raw = fresh * pricing.inputPerMTok +
+            cached * cachedRate +
+            usage.completionTokens * pricing.outputPerMTok
+        return Fx.toCny(raw / TOKENS_PER_MILLION, pricing.currency)
     }
 
     /** Drops the cached catalog of one provider (e.g. after editing its profile). */

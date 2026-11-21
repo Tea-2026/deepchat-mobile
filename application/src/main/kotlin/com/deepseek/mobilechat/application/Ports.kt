@@ -184,7 +184,32 @@ data class SearchOptions(val maxResults: Int = 5)
 data class SearchResponse(val query: String, val hits: List<com.deepseek.mobilechat.domain.SearchHit>)
 
 interface SearchPort {
+    /**
+     * Whether this source can run right now (key present, provider configured).
+     * [com.deepseek.mobilechat.application.service.DefaultSearchService] asks
+     * before falling back, so an unconfigured source never produces a failure
+     * the user has to read.
+     */
+    suspend fun isConfigured(): Boolean
+
     suspend fun search(query: String, options: SearchOptions = SearchOptions()): Outcome<SearchResponse>
+}
+
+/**
+ * Read side of the usage/spend ledger.
+ *
+ * Aggregation happens in SQL (the columns are denormalised for this reason), so
+ * the usage page never has to walk every message row.
+ */
+interface UsageAggregateStore {
+    /** Per-day totals with `dayStartMillis >= sinceMillis`, oldest day first. */
+    suspend fun dailyTotals(sinceMillis: Long): List<UsageDay>
+
+    /** Totals per (provider, model) over the same window, costliest first. */
+    suspend fun modelTotals(sinceMillis: Long): List<UsageByModel>
+
+    /** Everything one conversation has spent, including its abandoned branches. */
+    suspend fun conversationTotals(conversationId: ConversationId): UsageTotals
 }
 
 interface ConversationStore {
@@ -332,14 +357,30 @@ interface BackgroundExecutionPort {
 // Settings
 // ---------------------------------------------------------------------------
 
-enum class SearchProviderKind { TAVILY, BRAVE, SERPER }
+enum class SearchProviderKind {
+    /**
+     * DeepSeek's own server-side search, reached through its Anthropic-format
+     * endpoint. Needs no search credential — it reuses the DeepSeek provider's
+     * API key and bills as model tokens only.
+     */
+    DEEPSEEK,
+
+    /** Keyless fallback: Bing's RSS output. No credential at all. */
+    BING,
+
+    TAVILY,
+    BRAVE,
+    SERPER,
+}
 
 data class AppSettings(
-    val activeSearchProvider: SearchProviderKind = SearchProviderKind.TAVILY,
+    val activeSearchProvider: SearchProviderKind = SearchProviderKind.DEEPSEEK,
     val maxConcurrentGenerations: Int = 2,
     val streamingCheckpointMillis: Long = 300,
     /** "system" | "light" | "dark" */
     val themeMode: String = "system",
+    /** False until the first-run guide has been finished or skipped. */
+    val firstRunCompleted: Boolean = false,
 )
 
 interface SettingsStore {

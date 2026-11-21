@@ -125,7 +125,7 @@ internal object ExportFixtures {
                 promptTokens = 10,
                 completionTokens = 20,
                 reasoningTokens = 5,
-                costUsd = 0.0012,
+                cost = 0.0012,
             ),
             finishReason = FinishReason.STOP,
         )

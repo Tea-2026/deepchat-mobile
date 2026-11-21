@@ -73,7 +73,7 @@ class DefaultChatServiceSendTest {
         assertNull(assistant.error)
         assertEquals(100, assistant.usage!!.promptTokens)
         assertEquals(50, assistant.usage!!.completionTokens)
-        assertEquals(0.0002, assistant.usage!!.costUsd!!, 1e-12)
+        assertEquals(0.0002 * 7.2, assistant.usage!!.cost!!, 1e-12)
         assertEquals(harness.assembler.modelRef, assistant.modelInfo!!.ref)
 
         val conversation = harness.conversations.get(cid)!!

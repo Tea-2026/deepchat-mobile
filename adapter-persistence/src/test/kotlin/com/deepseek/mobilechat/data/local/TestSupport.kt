@@ -15,6 +15,7 @@ import com.deepseek.mobilechat.data.local.store.SqliteInjectionStore
 import com.deepseek.mobilechat.data.local.store.SqliteMessageStore
 import com.deepseek.mobilechat.data.local.store.SqlitePresetStore
 import com.deepseek.mobilechat.data.local.store.SqliteProviderProfileStore
+import com.deepseek.mobilechat.data.local.store.SqliteUsageAggregateStore
 import com.deepseek.mobilechat.domain.Conversation
 import com.deepseek.mobilechat.domain.ConversationId
 import com.deepseek.mobilechat.domain.ConversationOverrides
@@ -24,12 +25,18 @@ import com.deepseek.mobilechat.domain.MessageId
 import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
+import com.deepseek.mobilechat.domain.ModelId
+import com.deepseek.mobilechat.domain.ModelInfo
+import com.deepseek.mobilechat.domain.ModelRef
+import com.deepseek.mobilechat.domain.ProviderId
 import com.deepseek.mobilechat.domain.SamplingParams
 import com.deepseek.mobilechat.domain.TagId
+import com.deepseek.mobilechat.domain.ThinkingLevel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import java.io.File
 import java.nio.file.Files
+import java.util.TimeZone
 
 internal class MutableClock(var now: Long = 1_700_000_000_000L) : ClockPort {
     override fun nowMillis(): Long = now
@@ -53,6 +60,11 @@ internal class SequenceIdPort(private val prefix: String = "id") : IdPort {
 internal class TestEnv(
     val io: CoroutineDispatcher = Dispatchers.Unconfined,
     schema: (Db) -> Unit = Schema::create,
+    /**
+     * Calendar used by the usage aggregate store. Pinned by the usage tests so
+     * day boundaries do not depend on the machine running them.
+     */
+    zone: TimeZone = TimeZone.getDefault(),
 ) : AutoCloseable {
 
     val db: JdbcDb = JdbcDb.inMemory()
@@ -70,6 +82,8 @@ internal class TestEnv(
     val conversations = SqliteConversationStore(db, bus, io)
 
     val messages = SqliteMessageStore(db, bus, io)
+
+    val usage = SqliteUsageAggregateStore(db, io, zone)
 
     val presets = SqlitePresetStore(db, bus, io)
 
@@ -143,3 +157,14 @@ internal fun message(
 internal object Defaults {
     val params: SamplingParams = SamplingParams(temperature = 0.7, topP = 0.9, maxTokens = 2048)
 }
+
+/** Model attribution for a message: provider/model come from `ModelInfo.ref`. */
+internal fun modelInfo(
+    providerId: String = "prov",
+    modelId: String = "model",
+    thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+): ModelInfo = ModelInfo(
+    ref = ModelRef(ProviderId(providerId), ModelId(modelId)),
+    params = Defaults.params,
+    thinkingLevel = thinkingLevel,
+)

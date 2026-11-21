@@ -20,7 +20,7 @@ import com.deepseek.mobilechat.domain.MessageTree
 
 /**
  * Restarts an assistant turn: [regenerate] forks a sibling, [continueGeneration]
- * extends a length-truncated reply.
+ * extends a reply that stopped short of a natural end.
  *
  * Both share the same shape — point the conversation at the right leaf, assemble,
  * enforce the budget, then hand a streaming block to the scheduler — which is why
@@ -89,15 +89,85 @@ internal class AssistantTurnGenerator(
         return submit(sibling, assembly, appendToExisting = false)
     }
 
+    /**
+     * Starts the assistant reply for a user message that has none.
+     *
+     * Two callers share this: the fork branch of `editMessage` (a new sibling
+     * user message must not be a dead end) and the explicit "生成回复" recovery
+     * for branches whose active path already ends at an unanswered user message
+     * (data written before fork edits generated a reply). The message must be a
+     * leaf; an existing child means the branch already has its answer.
+     */
+    suspend fun replyTo(userMessageId: MessageId): Outcome<Unit> {
+        val message = messageStore.get(userMessageId)
+            ?: return Outcome.Err(AppError.Validation("message not found: ${userMessageId.raw}"))
+        if (message.role != MessageRole.USER) {
+            return Outcome.Err(AppError.Validation("only user messages can be answered"))
+        }
+        if (message.status == MessageStatus.STREAMING) {
+            return Outcome.Err(AppError.BranchConflict("message is already generating"))
+        }
+        val conversation = conversationStore.get(message.conversationId)
+            ?: return Outcome.Err(AppError.Validation("conversation not found: ${message.conversationId.raw}"))
+        val tree = MessageTree.from(messageStore.list(message.conversationId))
+        if (!tree.isLeaf(userMessageId)) {
+            return Outcome.Err(AppError.BranchConflict("message already has a reply"))
+        }
+
+        // The user message becomes the tail of the prompt, so it has to be the
+        // leaf the context is assembled from.
+        conversationStore.upsert(conversation.copy(activeLeafId = userMessageId))
+        val assembly = when (val outcome = contextAssembler.assemble(message.conversationId)) {
+            is Outcome.Ok -> outcome.value
+            is Outcome.Err -> {
+                conversationStore.upsert(conversation)
+                return Outcome.Err(outcome.error)
+            }
+        }
+        when (val allowed = budgetAllows(assembly, conversation)) {
+            is Outcome.Ok -> Unit
+            is Outcome.Err -> {
+                conversationStore.upsert(conversation)
+                return allowed
+            }
+        }
+
+        val assistant = assistantPlaceholder(
+            id = MessageId(idPort.newId()),
+            conversationId = message.conversationId,
+            parentId = userMessageId,
+            seq = tree.nextSeq(userMessageId),
+            createdAt = clock.nowMillis(),
+            assembly = assembly,
+        )
+        messageStore.append(assistant)
+        conversationStore.upsert(
+            conversation.copy(activeLeafId = assistant.id, updatedAt = assistant.createdAt),
+        )
+        return submit(assistant, assembly, appendToExisting = false)
+    }
+
     suspend fun continueGeneration(messageId: MessageId): Outcome<Unit> {
         val message = messageStore.get(messageId)
             ?: return Outcome.Err(AppError.Validation("message not found: ${messageId.raw}"))
         if (message.role != MessageRole.ASSISTANT) {
             return Outcome.Err(AppError.Validation("only assistant messages can be continued"))
         }
-        if (message.finishReason != FinishReason.LENGTH) {
+        // A reply can be continued when it stopped before a natural end:
+        // length-truncated, interrupted by a process death/cancel, or errored
+        // after partial output. The context assembler drops any empty or
+        // unanswered tool-call turn, so even an interrupted placeholder can be
+        // resumed without poisoning the next request.
+        val continuable = message.finishReason == FinishReason.LENGTH ||
+            message.status == MessageStatus.CANCELLED ||
+            message.status == MessageStatus.FAILED ||
+            message.finishReason == FinishReason.CANCELLED ||
+            message.finishReason == FinishReason.ERROR
+        if (!continuable) {
             return Outcome.Err(
-                AppError.Validation("continue is only available for a length-truncated reply"),
+                AppError.Validation(
+                    "continue is only available for a truncated, interrupted or failed reply",
+                ),
             )
         }
         if (message.status == MessageStatus.STREAMING) {

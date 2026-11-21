@@ -40,6 +40,8 @@ class TavilySearchAdapter(
     private val endpoint: String = "https://api.tavily.com/search",
 ) : SearchPort {
 
+    override suspend fun isConfigured(): Boolean = secrets.get(TAVILY_SECRET_REF)?.isNotBlank() == true
+
     override suspend fun search(query: String, options: SearchOptions): Outcome<SearchResponse> =
         withContext(Dispatchers.IO) {
             val apiKey = when (val secret = readSecret(secrets, TAVILY_SECRET_REF, "Tavily API key")) {
@@ -77,6 +79,8 @@ class BraveSearchAdapter(
     private val endpoint: String = "https://api.search.brave.com/res/v1/web/search",
 ) : SearchPort {
 
+    override suspend fun isConfigured(): Boolean = secrets.get(BRAVE_SECRET_REF)?.isNotBlank() == true
+
     override suspend fun search(query: String, options: SearchOptions): Outcome<SearchResponse> =
         withContext(Dispatchers.IO) {
             val apiKey = when (val secret = readSecret(secrets, BRAVE_SECRET_REF, "Brave Search API key")) {
@@ -109,6 +113,8 @@ class SerperSearchAdapter(
     private val http: HttpCaller,
     private val endpoint: String = "https://google.serper.dev/search",
 ) : SearchPort {
+
+    override suspend fun isConfigured(): Boolean = secrets.get(SERPER_SECRET_REF)?.isNotBlank() == true
 
     override suspend fun search(query: String, options: SearchOptions): Outcome<SearchResponse> =
         withContext(Dispatchers.IO) {
@@ -208,12 +214,59 @@ internal fun parseSerperResults(json: String): List<SearchHit> {
     }
 }
 
-/** Brave marks query terms with `<strong>`; plain text is what the prompt wants. */
-internal fun cleanSearchText(raw: String): String = raw
-    .replace(Regex("<[^>]+>"), "")
-    .replace("&quot;", "\"")
-    .replace("&#39;", "'")
-    .replace("&lt;", "<")
-    .replace("&gt;", ">")
-    .replace("&amp;", "&")
-    .trim()
+// ---------------------------------------------------------------------------
+// Text normalization shared by the search adapters
+// ---------------------------------------------------------------------------
+
+private val HTML_TAG = Regex("<[^>]+>")
+private val CDATA_BLOCK = Regex("<!\\[CDATA\\[(.*?)]]>", setOf(RegexOption.DOT_MATCHES_ALL))
+private val NUMERIC_ENTITY = Regex("&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
+private val NAMED_ENTITY = Regex("&([a-zA-Z][a-zA-Z0-9]*);")
+
+private val NAMED_ENTITIES: Map<String, String> = mapOf(
+    "amp" to "&",
+    "lt" to "<",
+    "gt" to ">",
+    "quot" to "\"",
+    "apos" to "'",
+    "nbsp" to " ",
+    "hellip" to "…",
+    "mdash" to "—",
+    "ndash" to "–",
+    "ldquo" to "“",
+    "rdquo" to "”",
+    "lsquo" to "‘",
+    "rsquo" to "’",
+)
+
+/**
+ * Decodes the XML/HTML entities the search APIs put in their text fields
+ * (`&amp;`, `&quot;`, `&#39;`, `&#x2014;`, …). A single replace pass means an
+ * entity that decodes to `&` is never decoded twice.
+ */
+internal fun decodeSearchEntities(raw: String): String {
+    val named = NAMED_ENTITY.replace(raw) { match ->
+        NAMED_ENTITIES[match.groupValues[1].lowercase()] ?: match.value
+    }
+    return NUMERIC_ENTITY.replace(named) { match ->
+        val code = match.groupValues[1].takeIf { it.isNotEmpty() }?.toIntOrNull(16)
+            ?: match.groupValues[2].toIntOrNull()
+        if (code != null && code in 1..0x10FFFF && code !in 0xD800..0xDFFF) {
+            String(Character.toChars(code))
+        } else {
+            ""
+        }
+    }
+}
+
+/** Removes `<b>`-style markup and unwraps CDATA sections. */
+internal fun stripSearchMarkup(raw: String): String =
+    HTML_TAG.replace(CDATA_BLOCK.replace(raw) { it.groupValues[1] }, "")
+
+/**
+ * Search APIs mark query terms with markup and escape their text; plain text is
+ * what the prompt wants. Entities are decoded before markup is stripped so
+ * escaped tags (`&lt;b&gt;`) disappear as tags rather than showing as text.
+ */
+internal fun cleanSearchText(raw: String): String =
+    stripSearchMarkup(decodeSearchEntities(raw)).trim()

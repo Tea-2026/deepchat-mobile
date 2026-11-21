@@ -3,6 +3,7 @@ package com.deepseek.mobilechat.data.local
 import com.deepseek.mobilechat.application.ImportedFile
 import com.deepseek.mobilechat.application.Outcome
 import com.deepseek.mobilechat.data.local.codec.JsonCodecs
+import com.deepseek.mobilechat.data.local.codec.PartsCodec
 import com.deepseek.mobilechat.data.local.db.Db
 import com.deepseek.mobilechat.data.local.db.JdbcDb
 import com.deepseek.mobilechat.data.local.db.Schema
@@ -11,6 +12,7 @@ import com.deepseek.mobilechat.domain.AttachmentKind
 import com.deepseek.mobilechat.domain.ConversationId
 import com.deepseek.mobilechat.domain.ConversationOverrides
 import com.deepseek.mobilechat.domain.MessageId
+import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.ModelId
 import com.deepseek.mobilechat.domain.ModelInfo
 import com.deepseek.mobilechat.domain.ModelRef
@@ -18,6 +20,7 @@ import com.deepseek.mobilechat.domain.PresetId
 import com.deepseek.mobilechat.domain.ProviderId
 import com.deepseek.mobilechat.domain.SamplingParams
 import com.deepseek.mobilechat.domain.ThinkingLevel
+import com.deepseek.mobilechat.domain.Usage
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -161,7 +164,7 @@ class MigrationTest {
     fun v1ThinkingLevelInsideJsonColumnsIsRewrittenToo() = runBlocking {
         TestEnv(schema = ::createV1Schema).use { env ->
             env.conversations.upsert(conversation("c1"))
-            env.messages.append(message("m1", "c1"))
+            insertPreV3Message(env.db, id = "m1", conversationId = "c1", createdAt = 1_000L)
 
             // The enum name is persisted in JSON as well; build the fixture with
             // the production encoders so the bytes match what v1 wrote, then swap
@@ -243,7 +246,13 @@ class MigrationTest {
         TestEnv(schema = ::createV1Schema).use { env ->
             val conversation = conversation("c1")
             env.conversations.upsert(conversation)
-            env.messages.append(message("m1", "c1", text = "survive the migration"))
+            insertPreV3Message(
+                env.db,
+                id = "m1",
+                conversationId = "c1",
+                createdAt = 1_000L,
+                parts = listOf(MessagePart.Text("survive the migration")),
+            )
             env.presets.upsert(
                 com.deepseek.mobilechat.domain.Preset(
                     id = PresetId("p1"),
@@ -253,9 +262,12 @@ class MigrationTest {
             )
             insertV1Attachment(env.db, id = "a1", conversationId = "c1")
 
-            Schema.migrate(env.db, fromVersion = 1, toVersion = 2)
+            // Upgrade the way the app does: to whatever the current schema is.
+            // A row set written by v1 has to survive every step, otherwise the
+            // upgrade from the oldest supported install is broken.
+            Schema.migrate(env.db, fromVersion = 1)
 
-            assertEquals(2, env.db.userVersion())
+            assertEquals(Schema.VERSION, env.db.userVersion())
             assertEquals("survive the migration", env.messages.get(MessageId("m1"))!!.text)
             assertEquals(conversation.title, env.conversations.get(ConversationId("c1"))!!.title)
             assertEquals(1, env.presets.observeAll().first().size)
@@ -270,6 +282,170 @@ class MigrationTest {
             env.messages.append(message("m2", "c1", seq = 2, text = "still writable"))
             assertEquals(2, env.messages.list(ConversationId("c1")).size)
             assertEquals(listOf("m2"), ftsMessageIds(env.db, "writable"))
+        }
+    }
+
+    @Test
+    fun v2MessagesGetTheUsageColumnsBackfilledFromTheirJson() = runBlocking {
+        TestEnv(schema = ::createV2Schema).use { env ->
+            env.conversations.upsert(conversation("c1"))
+
+            val currentUsage = JsonCodecs.encodeUsage(
+                Usage(
+                    promptTokens = 10,
+                    completionTokens = 5,
+                    reasoningTokens = 2,
+                    cachedPromptTokens = 4,
+                    cost = 0.5,
+                ),
+            )
+            // A row written by the 0.2.0 build: the estimate lives under
+            // "costUsd" and must land in usage_cost_cny the same way
+            // decodeUsage reads it back (as-is, no re-conversion).
+            val legacyUsage =
+                """{"promptTokens":7,"completionTokens":3,"reasoningTokens":1,""" +
+                    """"cachedPromptTokens":2,"costUsd":0.25}"""
+            val modelJson = JsonCodecs.encodeModelInfo(
+                ModelInfo(
+                    ref = ModelRef(ProviderId("prov-a"), ModelId("model-a")),
+                    params = SamplingParams(),
+                    thinkingLevel = ThinkingLevel.HIGH,
+                ),
+            )
+
+            insertPreV3Message(
+                env.db,
+                id = "m-current",
+                conversationId = "c1",
+                createdAt = 1_000L,
+                usageJson = currentUsage,
+                modelInfoJson = modelJson,
+            )
+            insertPreV3Message(
+                env.db,
+                id = "m-legacy",
+                conversationId = "c1",
+                createdAt = 2_000L,
+                usageJson = legacyUsage,
+                modelInfoJson = null,
+            )
+            insertPreV3Message(
+                env.db,
+                id = "m-model-only",
+                conversationId = "c1",
+                createdAt = 3_000L,
+                usageJson = null,
+                modelInfoJson = modelJson,
+            )
+            insertPreV3Message(
+                env.db,
+                id = "m-bare",
+                conversationId = "c1",
+                createdAt = 4_000L,
+            )
+
+            Schema.migrate(env.db, fromVersion = 2, toVersion = 3)
+
+            assertEquals(3, env.db.userVersion())
+
+            assertUsageColumns(
+                env.db,
+                "m-current",
+                UsageColumns(10, 4, 5, 0.5, "model-a", "prov-a"),
+            )
+            assertUsageColumns(
+                env.db,
+                "m-legacy",
+                UsageColumns(7, 2, 3, 0.25, null, null),
+            )
+            assertUsageColumns(
+                env.db,
+                "m-model-only",
+                UsageColumns(null, null, null, null, "model-a", "prov-a"),
+            )
+            assertUsageColumns(env.db, "m-bare", UsageColumns(null, null, null, null, null, null))
+
+            // The JSON columns remain the source of truth for the domain
+            // object; the migration did not rewrite them.
+            val stored = env.messages.get(MessageId("m-current"))!!
+            assertEquals(Usage(10, 5, 2, 4, 0.5), stored.usage)
+            assertEquals(ModelId("model-a"), stored.modelInfo!!.ref.modelId)
+
+            // And the aggregate store reads the backfilled columns.
+            val totals = env.usage.conversationTotals(ConversationId("c1"))
+            assertEquals(17L, totals.promptTokens)
+            assertEquals(6L, totals.cachedPromptTokens)
+            assertEquals(8L, totals.completionTokens)
+            assertEquals(0.75, totals.costCny, 1e-9)
+            assertEquals(2, totals.messageCount)
+        }
+    }
+
+    @Test
+    fun v1DatabaseUpgradesStraightToV3IncludingTheBackfill() = runBlocking {
+        TestEnv(schema = ::createV1Schema).use { env ->
+            env.conversations.upsert(conversation("c1"))
+
+            // v1 wrote MEDIUM into model_info_json; the v1->v2 step has to
+            // rewrite it before the v2->v3 step can decode the model columns.
+            val v1ModelJson = JsonCodecs.encodeModelInfo(
+                ModelInfo(
+                    ref = ModelRef(ProviderId("prov-a"), ModelId("model-a")),
+                    params = SamplingParams(),
+                    thinkingLevel = ThinkingLevel.HIGH,
+                ),
+            ).replace("\"thinkingLevel\":\"HIGH\"", "\"thinkingLevel\":\"MEDIUM\"")
+            assertTrue("\"thinkingLevel\":\"MEDIUM\"" in v1ModelJson)
+
+            insertPreV3Message(
+                env.db,
+                id = "m1",
+                conversationId = "c1",
+                createdAt = 1_000L,
+                usageJson = JsonCodecs.encodeUsage(
+                    Usage(promptTokens = 3, completionTokens = 2, cost = 0.03),
+                ),
+                modelInfoJson = v1ModelJson,
+            )
+
+            Schema.migrate(env.db, fromVersion = 1)
+
+            assertEquals(3, env.db.userVersion())
+            assertUsageColumns(
+                env.db,
+                "m1",
+                UsageColumns(3, 0, 2, 0.03, "model-a", "prov-a"),
+            )
+            assertEquals(ThinkingLevel.HIGH, env.messages.get(MessageId("m1"))!!.modelInfo!!.thinkingLevel)
+            assertEquals(
+                0,
+                env.db.query("SELECT 1 FROM messages WHERE model_info_json LIKE '%MEDIUM%'", emptyList()) { true }.size,
+            )
+        }
+    }
+
+    @Test
+    fun v3StepIsSafeToRunAgainWithoutDuplicatingColumns() = runBlocking {
+        TestEnv().use { env ->
+            env.conversations.upsert(conversation("c1"))
+            env.messages.append(
+                message("m1", "c1").copy(
+                    usage = Usage(promptTokens = 9, completionTokens = 4, cost = 0.09),
+                ),
+            )
+
+            // Simulate a hand-rolled downgrade of the version stamp; the
+            // column-existence guard must keep the step from failing on
+            // ADD COLUMN and the backfill must be a no-op.
+            env.db.setUserVersion(2)
+            Schema.migrate(env.db, fromVersion = 2, toVersion = 3)
+
+            assertEquals(3, env.db.userVersion())
+            val usageColumnCount = env.db
+                .query("PRAGMA table_info(messages)", emptyList()) { it.string(1) }
+                .count { it == "usage_prompt_tokens" }
+            assertEquals(1, usageColumnCount)
+            assertUsageColumns(env.db, "m1", UsageColumns(9, 0, 4, 0.09, null, null))
         }
     }
 
@@ -402,6 +578,81 @@ private fun <T> Outcome<T>.unwrap(): T = when (this) {
 private fun createV1Schema(db: Db) {
     V1_CREATE_STATEMENTS.forEach(db::exec)
     db.setUserVersion(1)
+}
+
+/**
+ * A real v2 database: the frozen v1 DDL (the only v2 DDL change is
+ * `attachments.conversation_id`, which [Schema.migrate] applies) upgraded by
+ * the shipped v1->v2 step. Building it through the migration instead of
+ * copy-pasting another frozen DDL keeps the fixture honest about what a v2
+ * install actually contains.
+ */
+private fun createV2Schema(db: Db) {
+    createV1Schema(db)
+    Schema.migrate(db, fromVersion = 1, toVersion = 2)
+}
+
+/**
+ * Inserts a message using only the pre-v3 columns, exactly like the v2 store
+ * did. The current store would write the v3 columns, which do not exist yet.
+ */
+private fun insertPreV3Message(
+    db: Db,
+    id: String,
+    conversationId: String,
+    createdAt: Long,
+    usageJson: String? = null,
+    modelInfoJson: String? = null,
+    parts: List<MessagePart> = emptyList(),
+) {
+    db.exec(
+        """
+        INSERT INTO messages
+            (id, conversation_id, parent_id, seq, role, status, parts_json, plain_text,
+             created_at, edited_at, pinned, model_info_json, usage_json, finish_reason, error)
+        VALUES (?, ?, NULL, 1, 'ASSISTANT', 'COMPLETE', ?, ?, ?, NULL, 0, ?, ?, NULL, NULL)
+        """.trimIndent(),
+        listOf(
+            id,
+            conversationId,
+            PartsCodec.encode(parts),
+            PartsCodec.plainText(parts),
+            createdAt,
+            modelInfoJson,
+            usageJson,
+        ),
+    )
+}
+
+private data class UsageColumns(
+    val prompt: Long?,
+    val cached: Long?,
+    val completion: Long?,
+    val cost: Double?,
+    val modelId: String?,
+    val providerId: String?,
+)
+
+private fun assertUsageColumns(db: Db, id: String, expected: UsageColumns) {
+    val actual = db.query(
+        """
+        SELECT usage_prompt_tokens, usage_cached_tokens, usage_completion_tokens,
+               usage_cost_cny, model_id, provider_id
+        FROM messages
+        WHERE id = ?
+        """.trimIndent(),
+        listOf(id),
+    ) { row ->
+        UsageColumns(
+            prompt = if (row.isNull(0)) null else row.long(0),
+            cached = if (row.isNull(1)) null else row.long(1),
+            completion = if (row.isNull(2)) null else row.long(2),
+            cost = row.double(3),
+            modelId = row.string(4),
+            providerId = row.string(5),
+        )
+    }.single()
+    assertEquals("$id usage columns", expected, actual)
 }
 
 /**

@@ -45,6 +45,7 @@ import com.deepseek.mobilechat.domain.ConversationId
 import com.deepseek.mobilechat.domain.Folder
 import com.deepseek.mobilechat.domain.Tag
 import com.deepseek.mobilechat.ui.AppServices
+import com.deepseek.mobilechat.ui.components.ChartIcon
 import com.deepseek.mobilechat.ui.components.CloseIcon
 import com.deepseek.mobilechat.ui.components.GearIcon
 import com.deepseek.mobilechat.ui.components.PlusIcon
@@ -94,6 +95,7 @@ fun RootDrawerContent(
     onOpenConversation: (ConversationId) -> Unit,
     onNewConversation: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenUsage: () -> Unit,
     onConversationDeleted: (ConversationId) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -282,6 +284,31 @@ fun RootDrawerContent(
 
         Surface(modifier = Modifier.fillMaxWidth(), color = chatColors.divider) {
             Box(modifier = Modifier.height(1.dp))
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pressable(onClick = onOpenUsage)
+                .padding(horizontal = Spacing.xl, vertical = Spacing.lg),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+        ) {
+            ChartIcon(
+                modifier = Modifier.iconSize(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "用量与花费",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.titleMedium,
+                color = chatColors.mutedText,
+            )
         }
 
         Row(

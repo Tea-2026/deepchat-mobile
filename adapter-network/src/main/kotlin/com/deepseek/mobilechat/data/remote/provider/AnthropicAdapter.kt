@@ -105,6 +105,7 @@ internal fun buildAnthropicBody(
 
     val messages = AnthropicMessagesBuilder()
     request.messages
+        .replayableHistory()
         .filter { it.role != MessageRole.SYSTEM }
         .forEach { prompt -> messages.add(anthropicRole(prompt), anthropicContentBlocks(prompt, resolveAttachment)) }
 
@@ -269,6 +270,10 @@ internal class AnthropicStreamParser {
 
     private var inputTokens = 0
     private var outputTokens = 0
+    /** Prompt tokens served from the provider's cache (billed at a discount). */
+    private var cacheReadTokens = 0
+    /** Prompt tokens written into the cache this request (billed as input). */
+    private var cacheCreationTokens = 0
     private var sawUsage = false
     private var emittedUsage = false
     private var finishedEmitted = false
@@ -289,7 +294,7 @@ internal class AnthropicStreamParser {
         return when (type) {
             "message_start" -> {
                 payload.obj("message")?.obj("usage")?.let { usage ->
-                    inputTokens = usage.int("input_tokens") ?: 0
+                    applyPromptUsage(usage)
                     sawUsage = true
                 }
                 emptyList()
@@ -335,9 +340,14 @@ internal class AnthropicStreamParser {
 
             "message_delta" -> {
                 payload.obj("delta")?.str("stop_reason")?.let { stopReason = mapAnthropicStopReason(it) }
-                payload.obj("usage")?.int("output_tokens")?.let { tokens ->
-                    outputTokens = tokens
-                    sawUsage = true
+                payload.obj("usage")?.let { usage ->
+                    // The final usage block restates the prompt counters with the
+                    // cache split included, so it wins over message_start.
+                    if (usage.int("input_tokens") != null) applyPromptUsage(usage)
+                    usage.int("output_tokens")?.let { tokens ->
+                        outputTokens = tokens
+                        sawUsage = true
+                    }
                 }
                 emptyList()
             }
@@ -359,12 +369,27 @@ internal class AnthropicStreamParser {
         }
     }
 
+    private fun applyPromptUsage(usage: kotlinx.serialization.json.JsonObject) {
+        inputTokens = usage.int("input_tokens") ?: 0
+        cacheReadTokens = usage.int("cache_read_input_tokens") ?: 0
+        cacheCreationTokens = usage.int("cache_creation_input_tokens") ?: 0
+    }
+
     /** Emits the deferred usage report plus a terminal event (idempotent). */
     fun finish(): List<GenerationEvent> {
         val events = mutableListOf<GenerationEvent>()
         if (sawUsage && !emittedUsage) {
             emittedUsage = true
-            events += GenerationEvent.UsageReport(Usage(promptTokens = inputTokens, completionTokens = outputTokens))
+            // Anthropic's `input_tokens` EXCLUDES cache hits. The total prompt
+            // is input + cache_read + cache_creation; keeping them apart is the
+            // only way the cost estimate can price the cache slice correctly.
+            events += GenerationEvent.UsageReport(
+                Usage(
+                    promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens,
+                    completionTokens = outputTokens,
+                    cachedPromptTokens = cacheReadTokens,
+                ),
+            )
         }
         if (!finishedEmitted) {
             finishedEmitted = true

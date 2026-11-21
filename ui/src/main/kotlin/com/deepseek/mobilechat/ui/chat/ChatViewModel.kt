@@ -18,6 +18,7 @@ import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
 import com.deepseek.mobilechat.domain.MessageTree
+import com.deepseek.mobilechat.domain.SearchHit
 import com.deepseek.mobilechat.domain.ModelId
 import com.deepseek.mobilechat.domain.ModelRef
 import com.deepseek.mobilechat.domain.Preset
@@ -28,6 +29,7 @@ import com.deepseek.mobilechat.ui.AppServices
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -103,6 +105,13 @@ class ChatViewModel(
     /** True between "conversation selected" and "its first emission arrived". */
     private var awaitingFirstEmission = false
 
+    /**
+     * True once the conversation aggregate has answered for the active id.
+     * `visibleMessages` refuses to build a transcript without it, so the screen
+     * must keep showing the loading state until it lands.
+     */
+    private var conversationLoaded = false
+
     private val thinkingStartedAt = mutableMapOf<MessageId, Long>()
     private val thinkingMeasured = mutableMapOf<MessageId, Int>()
 
@@ -113,6 +122,8 @@ class ChatViewModel(
         val text: String,
         val injection: String?,
         val attachmentIds: List<AttachmentId>,
+        /** Sources already fetched for this turn; replayed after a compaction. */
+        val searchHits: List<SearchHit>,
     )
 
     /** The in-flight send (search phase included); "停止" cancels it. */
@@ -123,40 +134,55 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch {
-            // Re-subscribes whenever the active conversation changes; the
-            // launched collectors are children of this block, so they die with
-            // the previous conversation instead of leaking.
+            // Re-subscribes whenever the active conversation changes. The
+            // collectors must be children of *this* block (hence
+            // `coroutineScope`, which suspends until they finish): a bare
+            // `launch` here would attach to `viewModelScope` instead, so the
+            // previous conversation's collectors would keep running after a
+            // switch and publish its snapshots into the next conversation's
+            // state on the next database change ("发送第二条消息时闪回上一个
+            // 会话").
             activeId.collectLatest { id ->
                 conversationSnapshot = null
                 messageSnapshot = emptyList()
                 awaitingFirstEmission = id != null
+                conversationLoaded = false
                 recompute()
                 if (id == null) return@collectLatest
-                launch {
-                    services.conversationStore.observe(id)
-                        .catch { _errors.tryEmit("加载会话失败：${it.message ?: "未知错误"}") }
-                        .collect { conversation ->
-                            conversationSnapshot = conversation
-                            recompute()
-                        }
-                }
-                launch {
-                    services.messageStore.observe(id)
-                        .catch { _errors.tryEmit("加载消息失败：${it.message ?: "未知错误"}") }
-                        .collect { messages ->
-                            messageSnapshot = messages
-                            awaitingFirstEmission = false
-                            measureThinking(messages)
-                            recompute()
-                            requestTitleIfNeeded(id, messages)
-                        }
-                }
-                launch {
-                    services.context.observeInjections(id)
-                        .catch { _errors.tryEmit("加载注入失败：${it.message ?: "未知错误"}") }
-                        .collect { injections ->
-                            _state.update { it.copy(injections = injections) }
-                        }
+                coroutineScope {
+                    launch {
+                        services.conversationStore.observe(id)
+                            .catch {
+                                _errors.tryEmit("加载会话失败：${it.message ?: "未知错误"}")
+                                // The flow is over; stop waiting for an aggregate
+                                // that will never come, or the spinner never ends.
+                                conversationLoaded = true
+                                recompute()
+                            }
+                            .collect { conversation ->
+                                conversationSnapshot = conversation
+                                conversationLoaded = true
+                                recompute()
+                            }
+                    }
+                    launch {
+                        services.messageStore.observe(id)
+                            .catch { _errors.tryEmit("加载消息失败：${it.message ?: "未知错误"}") }
+                            .collect { messages ->
+                                messageSnapshot = messages
+                                awaitingFirstEmission = false
+                                measureThinking(messages)
+                                recompute()
+                                requestTitleIfNeeded(id, messages)
+                            }
+                    }
+                    launch {
+                        services.context.observeInjections(id)
+                            .catch { _errors.tryEmit("加载注入失败：${it.message ?: "未知错误"}") }
+                            .collect { injections ->
+                                _state.update { it.copy(injections = injections) }
+                            }
+                    }
                 }
             }
         }
@@ -260,9 +286,12 @@ class ChatViewModel(
                 }
 
                 var injection = manualInjection
+                var searchHits: List<SearchHit> = emptyList()
                 if (searchFirst) {
                     _state.update { it.copy(isSearching = true) }
-                    injection = mergeInjections(manualInjection, searchPhase(trimmed))
+                    val phase = searchPhase(trimmed)
+                    injection = mergeInjections(manualInjection, phase.injection)
+                    searchHits = phase.hits
                     _state.update { it.copy(isSearching = false) }
                 }
                 val outcome = services.chat.send(
@@ -270,6 +299,7 @@ class ChatViewModel(
                     text = trimmed,
                     attachmentIds = attachmentIds,
                     ephemeralInjection = injection,
+                    searchHits = searchHits,
                 )
                 when (outcome) {
                     is Outcome.Ok -> when (val result = outcome.value) {
@@ -282,7 +312,7 @@ class ChatViewModel(
                         }
 
                         is SendResult.NeedsConfirmation -> {
-                            pendingSend = PendingSend(trimmed, injection, attachmentIds)
+                            pendingSend = PendingSend(trimmed, injection, attachmentIds, searchHits)
                             _state.update {
                                 it.copy(compactionProposal = result.proposal, isSending = false)
                             }
@@ -294,7 +324,7 @@ class ChatViewModel(
                         if (outcome.error is AppError.BudgetExceeded) {
                             // Some implementations surface the proposal as an
                             // error instead of NeedsConfirmation; never drop the text.
-                            pendingSend = PendingSend(trimmed, injection, attachmentIds)
+                            pendingSend = PendingSend(trimmed, injection, attachmentIds, searchHits)
                         }
                         _state.update {
                             it.copy(draftText = restoreText(trimmed), isSending = false)
@@ -326,15 +356,31 @@ class ChatViewModel(
         _state.update { it.copy(searchEnabled = !it.searchEnabled) }
     }
 
-    /** Search first, then send with the hits folded into the injection. */
-    private suspend fun searchPhase(query: String): String? =
+    /**
+     * Search first, then send with the hits folded into the injection.
+     *
+     * The same hits also travel to [com.deepseek.mobilechat.application.ChatService.send]
+     * so they can be recorded on the message and rendered as "参考 N 个网页";
+     * without that the sources exist only inside the prompt and the user can
+     * never see where an answer came from.
+     */
+    private suspend fun searchPhase(query: String): SearchPhase =
         when (val outcome = services.search.webSearch(query)) {
-            is Outcome.Ok -> formatSearchInjection(query, outcome.value.hits)
+            is Outcome.Ok -> SearchPhase(
+                injection = formatSearchInjection(query, outcome.value.hits),
+                hits = outcome.value.hits,
+            )
+
             is Outcome.Err -> {
                 _errors.tryEmit(outcome.error.toUserMessage())
-                searchFailureInjection(outcome.error.toUserMessage())
+                SearchPhase(
+                    injection = searchFailureInjection(outcome.error.toUserMessage()),
+                    hits = emptyList(),
+                )
             }
         }
+
+    private data class SearchPhase(val injection: String?, val hits: List<SearchHit>)
 
     /**
      * Deletes a conversation that was created for a first message which then
@@ -413,6 +459,23 @@ class ChatViewModel(
 
     /** Retry after a failed assistant turn: same command as regenerate. */
     fun retry(messageId: MessageId) = regenerate(messageId)
+
+    /**
+     * Explicit recovery for a branch whose active leaf is an unanswered user
+     * message (legacy fork data, or a fork whose generation failed). The
+     * service routes a user id to "start the assistant reply"; nothing is
+     * generated until the user taps the affordance.
+     */
+    fun generateReply() {
+        val leaf = _state.value.conversation?.activeLeafId ?: return
+        if (_state.value.isBusy) return
+        viewModelScope.launch {
+            when (val outcome = services.chat.regenerate(leaf)) {
+                is Outcome.Ok -> Unit
+                is Outcome.Err -> handleError(outcome.error)
+            }
+        }
+    }
 
     fun edit(messageId: MessageId, text: String) {
         val trimmed = text.trim()
@@ -569,6 +632,7 @@ class ChatViewModel(
                                 text = pending.text,
                                 attachmentIds = pending.attachmentIds,
                                 ephemeralInjection = pending.injection,
+                                searchHits = pending.searchHits,
                             )
                         ) {
                             is Outcome.Ok -> when (val result = sent.value) {
@@ -618,6 +682,7 @@ class ChatViewModel(
         val visible = visibleMessages(tree, conversation, all)
         val branches = buildBranches(tree, visible)
         val generating = all.any { it.status == MessageStatus.STREAMING }
+        val needsReply = leafNeedsReply(tree, conversation)
         val overrides = overridesOf(id, conversation)
         val preset = effectivePreset(overrides)
         // Same precedence the context assembler uses, so the chip always names
@@ -640,6 +705,7 @@ class ChatViewModel(
                 messages = visible,
                 branches = branches,
                 isGenerating = generating,
+                needsReply = needsReply,
                 title = title,
                 subtitle = subtitle,
                 activeModel = activeModel,
@@ -648,7 +714,9 @@ class ChatViewModel(
                 paramsOverridden = overrides.params != null,
                 systemPrompt = overrides.systemPrompt.orEmpty(),
                 thinkingSeconds = thinkingMeasured.toMap(),
-                isLoadingConversation = awaitingFirstEmission && visible.isEmpty(),
+                isLoadingConversation = id != null &&
+                    visible.isEmpty() &&
+                    (awaitingFirstEmission || !conversationLoaded),
             )
         }
     }
