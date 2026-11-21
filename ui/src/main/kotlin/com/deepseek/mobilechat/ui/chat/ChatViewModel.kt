@@ -148,6 +148,7 @@ class ChatViewModel(
                     coroutineScope {
                         launch { loadOverridesOnly(id) }
                         launch { collectSnapshots(gateway.snapshots(id), expected = id) }
+                        launch { collectInjections(id) }
                     }
                 }
             }
@@ -169,6 +170,24 @@ class ChatViewModel(
                 }
         }
         recompute()
+    }
+
+    /**
+     * Manual context injections are not chat history — they are a side panel with
+     * its own lifecycle — so they still come from the context service instead of
+     * `ChatSnapshot`. Scoped to the conversation by the caller, so a switch cancels
+     * it and the badge cannot show the previous conversation's injections.
+     */
+    private suspend fun collectInjections(id: ConversationId) {
+        try {
+            services.context.observeInjections(id)
+                .catch { /* the badge is cosmetic; the panel reports its own errors */ }
+                .collect { list -> _state.update { it.copy(injections = list) } }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // A broken context service must never take the chat down with it.
+        }
     }
 
     /** The single subscription: one flow, one snapshot at a time. */
