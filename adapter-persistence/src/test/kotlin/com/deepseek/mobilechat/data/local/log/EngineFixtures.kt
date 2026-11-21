@@ -95,7 +95,11 @@ internal object NoSearch : SearchPort {
 }
 
 /** The production gateway over the real stores from [env]. */
-internal fun engineGateway(env: TestEnv, completion: ChatCompletionPort): ChatGateway {
+internal fun engineGateway(
+    env: TestEnv,
+    completion: ChatCompletionPort,
+    reconcileOnStart: Boolean = false,
+): ChatGateway {
     val provider = ProviderProfile(
         id = ProviderId("provider-1"),
         name = "Test",
@@ -125,6 +129,6 @@ internal fun engineGateway(env: TestEnv, completion: ChatCompletionPort): ChatGa
         settingsStore = FakeSettings(),
         clock = env.clock,
         idPort = env.ids,
-        reconcileOnStart = false,
+        reconcileOnStart = reconcileOnStart,
     )
 }

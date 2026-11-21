@@ -4,6 +4,7 @@ import com.deepseek.mobilechat.application.Outcome
 import com.deepseek.mobilechat.data.local.TestEnv
 import com.deepseek.mobilechat.data.local.conversation
 import com.deepseek.mobilechat.domain.ConversationId
+import com.deepseek.mobilechat.domain.MessageId
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
 import com.deepseek.mobilechat.domain.log.EventType
@@ -130,5 +131,62 @@ class EngineOnRealStoreTest {
             "新回答",
             done.messages.first { it.id == done.activeLeafId }.text,
         )
+    }
+
+    @Test
+    fun `the first-run path creates a conversation and sends into it`() = runBlocking {
+        val completion = ScriptedCompletion(listOf("首答"))
+        val gateway = engineGateway(env, completion)
+
+        // Before anything happens the draft snapshot is idle, not a fake conversation.
+        val draft = gateway.draftSnapshot().first()
+        assertTrue("draft has no messages", draft.messages.isEmpty())
+        assertNull(draft.overlay.busy)
+
+        val created = gateway.createConversation()
+        assertTrue("createConversation should succeed: $created", created is Outcome.Ok)
+        val id = (created as Outcome.Ok).value
+
+        assertTrue(gateway.send(id, "第一句") is Outcome.Ok)
+        val snapshot = withTimeout(15_000) {
+            gateway.snapshots(id).first { candidate ->
+                candidate.overlay.streaming == null &&
+                    candidate.messages.any { it.role == MessageRole.ASSISTANT && it.text == "首答" }
+            }
+        }
+        assertEquals(2, snapshot.messages.size)
+        assertEquals("first turn becomes a title", true, snapshot.title.isNotEmpty())
+        assertNull(snapshot.overlay.busy)
+    }
+
+    @Test
+    fun `startup reconciliation settles a leftover draft into an interrupted turn`() = runBlocking {
+        seedConversation()
+        // Simulate a process death mid-stream: a draft exists, but the log has no
+        // terminal event for that message.
+        val orphan = com.deepseek.mobilechat.domain.MessageId("orphan-1")
+        env.drafts.put(conversationId, orphan, "半个回答", "半段思考")
+
+        engineGateway(env, ScriptedCompletion(listOf("unused")), reconcileOnStart = true)
+
+        val log = withTimeout(15_000) {
+            var current = env.log.log(conversationId)
+            while (current.events.none { it.type == EventType.TURN_INTERRUPTED }) {
+                kotlinx.coroutines.delay(20)
+                current = env.log.log(conversationId)
+            }
+            current
+        }
+        val interrupted = log.events.single { it.type == EventType.TURN_INTERRUPTED }
+        val data = interrupted.data as com.deepseek.mobilechat.domain.log.EventData.TurnInterrupted
+        assertEquals(orphan, data.messageId)
+        assertEquals("半个回答", data.partialText)
+
+        val transcript = com.deepseek.mobilechat.domain.log.TranscriptProjector.project(log)
+        val message = transcript.message(orphan)
+        assertNotNull("the half answer must survive the crash", message)
+        assertEquals(MessageStatus.CANCELLED, message!!.status)
+        assertEquals("半个回答", message.text)
+        assertNull("the draft is consumed", env.drafts.get(orphan))
     }
 }
