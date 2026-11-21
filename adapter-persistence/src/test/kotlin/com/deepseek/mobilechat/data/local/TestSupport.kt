@@ -64,14 +64,14 @@ internal class SequenceIdPort(private val prefix: String = "id") : IdPort {
 internal class TestEnv(
     val io: CoroutineDispatcher = Dispatchers.Unconfined,
     schema: (Db) -> Unit = Schema::create,
+    /** Injectable so a test can run against a migrated copy of a real database. */
+    val db: JdbcDb = JdbcDb.inMemory(),
     /**
      * Calendar used by the usage aggregate store. Pinned by the usage tests so
      * day boundaries do not depend on the machine running them.
      */
     zone: TimeZone = TimeZone.getDefault(),
 ) : AutoCloseable {
-
-    val db: JdbcDb = JdbcDb.inMemory()
 
     val bus: ChangeBus = ChangeBus()
 
