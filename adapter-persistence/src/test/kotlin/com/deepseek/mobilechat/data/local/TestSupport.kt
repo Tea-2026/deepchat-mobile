@@ -7,14 +7,18 @@ import com.deepseek.mobilechat.data.local.db.Db
 import com.deepseek.mobilechat.data.local.db.JdbcDb
 import com.deepseek.mobilechat.data.local.db.Schema
 import com.deepseek.mobilechat.data.local.files.AndroidFileSink
+import com.deepseek.mobilechat.data.local.log.ConversationProjector
+import com.deepseek.mobilechat.data.local.log.SqliteConversationSnapshotCache
 import com.deepseek.mobilechat.data.local.store.SqliteAttachmentStore
 import com.deepseek.mobilechat.data.local.store.SqliteCompactionStore
+import com.deepseek.mobilechat.data.local.store.SqliteConversationLogStore
 import com.deepseek.mobilechat.data.local.store.SqliteConversationStore
 import com.deepseek.mobilechat.data.local.store.SqliteFolderTagStore
 import com.deepseek.mobilechat.data.local.store.SqliteInjectionStore
 import com.deepseek.mobilechat.data.local.store.SqliteMessageStore
 import com.deepseek.mobilechat.data.local.store.SqlitePresetStore
 import com.deepseek.mobilechat.data.local.store.SqliteProviderProfileStore
+import com.deepseek.mobilechat.data.local.store.SqliteTurnDraftStore
 import com.deepseek.mobilechat.data.local.store.SqliteUsageAggregateStore
 import com.deepseek.mobilechat.domain.Conversation
 import com.deepseek.mobilechat.domain.ConversationId
@@ -96,6 +100,14 @@ internal class TestEnv(
     val foldersAndTags = SqliteFolderTagStore(db, bus, io)
 
     val attachments = SqliteAttachmentStore(db, sink, ids, clock, bus, io)
+
+    val log = SqliteConversationLogStore(db, bus, io)
+
+    val drafts = SqliteTurnDraftStore(db, clock, io)
+
+    val snapshots = SqliteConversationSnapshotCache(db, io)
+
+    val projector = ConversationProjector(log, snapshots)
 
     init {
         schema(db)

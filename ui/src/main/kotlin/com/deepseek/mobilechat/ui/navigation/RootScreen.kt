@@ -69,7 +69,11 @@ fun RootScreen(
 
     val viewModel: ChatViewModel = viewModel(
         key = "root-chat",
-        factory = ChatViewModel.factory(services, null),
+        factory = ChatViewModel.factory(
+            services,
+            com.deepseek.mobilechat.ui.chat.LocalChatGateway.current,
+            null,
+        ),
     )
 
     LaunchedEffect(currentRaw) {

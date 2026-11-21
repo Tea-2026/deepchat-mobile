@@ -6,6 +6,7 @@ import com.deepseek.mobilechat.domain.MessageId
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageTree
 import com.deepseek.mobilechat.domain.ThinkingLevel
+import com.deepseek.mobilechat.domain.log.TranscriptNode
 
 /**
  * Pure derivations the chat screen needs from the raw message tree.
@@ -67,6 +68,61 @@ internal fun buildBranches(
         )
     }
     return out
+}
+
+/**
+ * The display rows for the transcript.
+ *
+ * [transcript] is the snapshot's human projection (append-origin messages plus
+ * compaction dividers); [visible] is the active path derived from the same
+ * snapshot. Keeping the transcript's order and dropping only the messages that
+ * are off the active path is what lets a divider land between the messages it
+ * covers without flattening a branched history into a list it cannot key.
+ *
+ * The covered messages are *not* removed from the transcript (I5): every
+ * message in the range stays visible above the divider, unless it is off the
+ * active path — in which case `visible` already excluded it.
+ */
+internal fun buildTranscript(
+    transcript: List<TranscriptNode>,
+    visible: List<Message>,
+): List<TranscriptRow> {
+    if (transcript.isEmpty()) return visible.map { TranscriptRow.Turn(it) }
+
+    val visibleById = visible.associateBy { it.id }
+    val coveredByBar = HashMap<TranscriptNode.CompactionBar, Int>()
+    transcript.forEach { node ->
+        if (node is TranscriptNode.CompactionBar) {
+            coveredByBar[node] = transcript.count { candidate ->
+                candidate is TranscriptNode.MessageNode &&
+                    candidate.seq in node.startSeq..node.endSeq
+            }
+        }
+    }
+
+    val rows = ArrayList<TranscriptRow>(transcript.size)
+    val used = HashSet<MessageId>()
+    transcript.forEach { node ->
+        when (node) {
+            is TranscriptNode.MessageNode -> {
+                val message = visibleById[node.message.id] ?: return@forEach
+                used += message.id
+                rows += TranscriptRow.Turn(message)
+            }
+
+            is TranscriptNode.CompactionBar -> rows += TranscriptRow.CompactionDivider(
+                compactionId = node.compactionId,
+                coveredCount = coveredByBar[node] ?: 0,
+                summary = node.summary,
+                tokensBefore = node.tokensBefore,
+                tokensAfter = node.tokensAfter,
+            )
+        }
+    }
+    // Defensive: a visible message the projection did not mention is still shown
+    // (the active path, not the transcript, decides what is visible).
+    visible.forEach { if (it.id !in used) rows += TranscriptRow.Turn(it) }
+    return rows
 }
 
 /**

@@ -1,5 +1,6 @@
 package com.deepseek.mobilechat.ui.chat
 
+import com.deepseek.mobilechat.domain.CompactionId
 import com.deepseek.mobilechat.domain.Conversation
 import com.deepseek.mobilechat.domain.ConversationId
 import com.deepseek.mobilechat.domain.Message
@@ -8,6 +9,7 @@ import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
 import com.deepseek.mobilechat.domain.MessageTree
+import com.deepseek.mobilechat.domain.log.TranscriptNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -137,5 +139,85 @@ class ChatDerivationTest {
 
         assertFalse(leafNeedsReply(tree, null))
         assertFalse(leafNeedsReply(tree, conversation(null)))
+    }
+
+    // -----------------------------------------------------------------------
+    // buildTranscript: transcript order + compaction dividers
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a compaction divider keeps the covered messages above it`() {
+        val nodes = listOf(
+            TranscriptNode.MessageNode(1L, root),
+            TranscriptNode.MessageNode(2L, reply2),
+            TranscriptNode.CompactionBar(
+                compactionId = CompactionId("c-1"),
+                startSeq = 1L,
+                endSeq = 2L,
+                summary = "这两个回合的摘要",
+                tokensBefore = 900,
+                tokensAfter = 300,
+            ),
+        )
+
+        val rows = buildTranscript(nodes, visible = listOf(root, reply2))
+
+        assertEquals(3, rows.size)
+        assertEquals(root.id, (rows[0] as TranscriptRow.Turn).message.id)
+        assertEquals(reply2.id, (rows[1] as TranscriptRow.Turn).message.id)
+        val divider = rows[2] as TranscriptRow.CompactionDivider
+        assertEquals(CompactionId("c-1"), divider.compactionId)
+        assertEquals(2, divider.coveredCount)
+        assertEquals("这两个回合的摘要", divider.summary)
+        assertEquals(900, divider.tokensBefore)
+        assertEquals(300, divider.tokensAfter)
+    }
+
+    @Test
+    fun `messages that are off the active path are not rendered, but the divider is`() {
+        val nodes = listOf(
+            TranscriptNode.MessageNode(1L, root),
+            TranscriptNode.MessageNode(2L, reply1),
+            TranscriptNode.MessageNode(3L, reply2),
+            TranscriptNode.CompactionBar(
+                compactionId = CompactionId("c-1"),
+                startSeq = 2L,
+                endSeq = 2L,
+                summary = "s",
+                tokensBefore = null,
+                tokensAfter = null,
+            ),
+        )
+
+        // The active path goes through reply-2, so reply-1 is filtered out; the
+        // divider is a transcript event and still renders.
+        val rows = buildTranscript(nodes, visible = listOf(root, reply2))
+
+        assertEquals(3, rows.size)
+        assertEquals(root.id, (rows[0] as TranscriptRow.Turn).message.id)
+        assertEquals(reply2.id, (rows[1] as TranscriptRow.Turn).message.id)
+        assertTrue(rows[2] is TranscriptRow.CompactionDivider)
+    }
+
+    @Test
+    fun `a streaming message is an ordinary turn row, not a UI-special row`() {
+        val streaming = message("streaming", "root", 2).copy(status = MessageStatus.STREAMING)
+        val nodes = listOf(
+            TranscriptNode.MessageNode(1L, root),
+            TranscriptNode.MessageNode(2L, streaming),
+        )
+
+        val rows = buildTranscript(nodes, visible = listOf(root, streaming))
+
+        assertEquals(2, rows.size)
+        assertTrue(rows[1] is TranscriptRow.Turn)
+        assertEquals(MessageStatus.STREAMING, (rows[1] as TranscriptRow.Turn).message.status)
+    }
+
+    @Test
+    fun `a visible message the projection missed is still appended`() {
+        val rows = buildTranscript(emptyList(), visible = listOf(root, reply2))
+
+        assertEquals(listOf(root.id, reply2.id), rows.map { (it as TranscriptRow.Turn).message.id })
     }
 }

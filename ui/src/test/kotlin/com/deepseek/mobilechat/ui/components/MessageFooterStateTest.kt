@@ -43,8 +43,10 @@ class MessageFooterStateTest {
 
         assertEquals(MessageFooterMode.INTERRUPTED, state.mode)
         assertTrue(state.visible)
-        assertTrue(state.canContinue)
-        assertFalse(state.canRetry)
+        // 「继续生成」 is temporarily replaced by 「重试」: the v2-log engine has no
+        // assistant-prefix continuation yet, and a dead button is worse than none.
+        assertFalse(state.canContinue)
+        assertTrue(state.canRetry)
     }
 
     @Test
@@ -53,7 +55,7 @@ class MessageFooterStateTest {
 
         assertEquals(MessageFooterMode.FAILED, state.mode)
         assertTrue(state.visible)
-        assertTrue(state.canContinue)
+        assertFalse(state.canContinue)
         assertTrue(state.canRetry)
     }
 
@@ -62,7 +64,8 @@ class MessageFooterStateTest {
         val state = messageFooterState(assistant(MessageStatus.COMPLETE, FinishReason.ERROR))
 
         assertEquals(MessageFooterMode.FAILED, state.mode)
-        assertTrue(state.canContinue)
+        assertFalse(state.canContinue)
+        assertTrue(state.canRetry)
     }
 
     @Test
@@ -70,7 +73,8 @@ class MessageFooterStateTest {
         val state = messageFooterState(assistant(MessageStatus.COMPLETE, FinishReason.LENGTH))
 
         assertEquals(MessageFooterMode.TRUNCATED, state.mode)
-        assertTrue(state.canContinue)
+        assertFalse(state.canContinue)
+        assertTrue(state.canRetry)
     }
 
     @Test

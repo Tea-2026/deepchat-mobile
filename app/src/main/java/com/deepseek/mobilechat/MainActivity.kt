@@ -9,6 +9,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.deepseek.mobilechat.application.AppSettings
 import com.deepseek.mobilechat.ui.LocalAppServices
+import com.deepseek.mobilechat.ui.chat.LocalChatGateway
 import com.deepseek.mobilechat.ui.screens.settings.SettingsCapability
 import com.deepseek.mobilechat.ui.theme.MobileChatTheme
 
@@ -33,7 +34,11 @@ class MainActivity : ComponentActivity() {
             }
 
             MobileChatTheme(darkTheme = darkTheme) {
-                CompositionLocalProvider(LocalAppServices provides container) {
+                CompositionLocalProvider(
+                    LocalAppServices provides container,
+                    // The chat screen talks to the engine, never to the stores.
+                    LocalChatGateway provides container.chatGateway,
+                ) {
                     AppNavHost(services = container)
                 }
             }

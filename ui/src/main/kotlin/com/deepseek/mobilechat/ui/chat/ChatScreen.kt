@@ -259,7 +259,7 @@ fun ChatScreen(
                             )
                         } else {
                             ChatMessageList(
-                                messages = state.messages,
+                                transcript = state.transcript,
                                 branches = state.branches,
                                 listState = listState,
                                 editing = editingMessage,
@@ -426,7 +426,7 @@ fun ChatScreen(
     onOpenInjections: () -> Unit,
 ) {
     val viewModel: ChatViewModel = viewModel(
-        factory = ChatViewModel.factory(services, conversationId),
+        factory = ChatViewModel.factory(services, LocalChatGateway.current, conversationId),
     )
     ChatScreen(
         services = services,

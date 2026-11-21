@@ -21,6 +21,14 @@ import com.deepseek.mobilechat.data.local.codec.JsonCodecs
  *   [migrateV2ToV3] adds the columns and backfills them from the JSON blobs
  *   that are still the source of truth; a fresh v3 database writes both from
  *   `SqliteMessageStore`.
+ * - **4** — the event log. `conversation_events` becomes the truth for a
+ *   conversation's history, `conversation_snapshots` caches the two folds and
+ *   `turn_drafts` holds streaming scratch state. `messages` stays behind as a
+ *   read-only legacy table for one version; `conversations` becomes the
+ *   rebuildable index for the conversation list. [migrateV3ToV4] creates the
+ *   three tables and converts every existing conversation into events in
+ *   `(parentId, seq)` topological order, verifying the result against the old
+ *   rows before the upgrade commits (see `LegacyLogMigration`).
  *
  * The FTS index is an FTS4 **external content** table over `messages.plain_text`
  * and is kept in sync by SQL triggers (see [CREATE_STATEMENTS]). Triggers were
@@ -42,9 +50,59 @@ import com.deepseek.mobilechat.data.local.codec.JsonCodecs
  */
 object Schema {
 
-    const val VERSION: Int = 3
+    const val VERSION: Int = 4
 
     const val DATABASE_NAME: String = "mobilechat.db"
+
+    /**
+     * The v4 log tables, shared by the fresh-schema builder and the v3 -> v4
+     * migration. The DDL is the one frozen in
+     * `docs/architecture-v2-log.md` §13.5.
+     *
+     * `idx_events_type` serves "all events of type X" (projection registries,
+     * audits); `idx_events_event_id` enforces the envelope's global-uniqueness
+     * promise for `event_id`, which is what makes an idempotent replay lookup
+     * possible at all. `conversation_snapshots` needs no extra index: its
+     * primary key already starts with `conversation_id`, which is exactly how
+     * both `get(version)` and `MAX(version)` query it.
+     */
+    val LOG_STATEMENTS: List<String> = listOf(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_events (
+            conversation_id TEXT NOT NULL,
+            seq             INTEGER NOT NULL,
+            event_id        TEXT NOT NULL,
+            type            TEXT NOT NULL,
+            schema_version  INTEGER NOT NULL,
+            time            INTEGER NOT NULL,
+            ignorable       INTEGER NOT NULL DEFAULT 0,
+            surface_op_json TEXT,
+            source_seqs_json TEXT,
+            data_json       TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, seq)
+        )
+        """.trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_events_type ON conversation_events(conversation_id, type)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON conversation_events(event_id)",
+        """
+        CREATE TABLE IF NOT EXISTS conversation_snapshots (
+            conversation_id TEXT NOT NULL,
+            version         INTEGER NOT NULL,
+            surface_json    TEXT NOT NULL,
+            transcript_json TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, version)
+        )
+        """.trimIndent(),
+        """
+        CREATE TABLE IF NOT EXISTS turn_drafts (
+            message_id      TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            text            TEXT NOT NULL,
+            reasoning       TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL
+        )
+        """.trimIndent(),
+    )
 
     /** Every statement needed to build the schema from scratch. Idempotent. */
     val CREATE_STATEMENTS: List<String> = listOf(
@@ -221,7 +279,7 @@ object Schema {
             INSERT INTO messages_fts(docid, plain_text) VALUES (new.rowid, new.plain_text);
         END
         """.trimIndent(),
-    )
+    ) + LOG_STATEMENTS
 
     /** Creates the schema for a fresh database and stamps [VERSION]. */
     fun create(db: Db) {
@@ -272,6 +330,7 @@ object Schema {
     private val MIGRATIONS: Map<Int, (Db) -> Unit> = mapOf(
         1 to ::migrateV1ToV2,
         2 to ::migrateV2ToV3,
+        3 to ::migrateV3ToV4,
     )
 
     /**
@@ -426,6 +485,34 @@ object Schema {
         backfillUsageColumns(db)
 
         db.exec("CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)")
+    }
+
+    /**
+     * v3 -> v4: create the log tables and convert existing history into events.
+     *
+     * Two phases:
+     *
+     *  1. [LOG_STATEMENTS] — the three tables plus the two indexes. `IF NOT
+     *     EXISTS` makes the step harmless to re-run after a hand-rolled
+     *     `user_version` rollback.
+     *  2. [LegacyLogMigration.run] — for every conversation, rebuild the
+     *     message tree in `(parentId, seq)` topological order, append
+     *     `session/title`, one message event per row, `leaf/changed`, and the
+     *     `compaction/start` + stand-in + `compaction/end` triplet for legacy
+     *     compactions. The conversion is verified by replaying the freshly
+     *     written log and comparing it field-for-field with the old rows; any
+     *     discrepancy throws and rolls the whole upgrade back, leaving the
+     *     `messages`/`conversations` tables untouched.
+     *
+     * Each conversation is converted inside its own `db.transaction { … }` so
+     * the unit of work is one conversation even though `migrate` (and Android's
+     * `SQLiteOpenHelper.onUpgrade`) wrap the whole upgrade in an outer
+     * transaction; nested transactions join that outer one, which makes the
+     * upgrade all-or-nothing rather than per-conversation-durable.
+     */
+    private fun migrateV3ToV4(db: Db) {
+        LOG_STATEMENTS.forEach(db::exec)
+        LegacyLogMigration.run(db)
     }
 
     /**

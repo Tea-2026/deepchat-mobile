@@ -32,6 +32,9 @@ class SchemaTest {
                 "conversation_tags",
                 "attachments",
                 "messages_fts",
+                "conversation_events",
+                "conversation_snapshots",
+                "turn_drafts",
             ).forEach { table ->
                 assertTrue("missing table $table", ("table" to table) in objects)
             }
@@ -46,6 +49,8 @@ class SchemaTest {
                 "idx_messages_time",
                 "idx_messages_created_at",
                 "idx_conversations_updated",
+                "idx_events_type",
+                "idx_events_event_id",
             ).forEach { index ->
                 assertTrue("missing index $index", ("index" to index) in objects)
             }
@@ -60,12 +65,38 @@ class SchemaTest {
     }
 
     @Test
-    fun schemaVersionIsThree() {
+    fun schemaVersionIsFour() {
         TestEnv().use { env ->
             // Literal on purpose: bumping the DDL without writing a migration
             // must fail here as well as in the migration tests.
-            assertEquals(3, Schema.VERSION)
-            assertEquals(3, env.db.userVersion())
+            assertEquals(4, Schema.VERSION)
+            assertEquals(4, env.db.userVersion())
+        }
+    }
+
+    @Test
+    fun conversationEventsUseTheCompositeKeyAndUniqueEventId() {
+        TestEnv().use { env ->
+            val eventColumns = env.db
+                .query("PRAGMA table_info(conversation_events)", emptyList()) { row ->
+                    Triple(row.string(1) ?: "", row.int(3) != 0, row.int(5))
+                }
+            // (name, NOT NULL, primary-key position)
+            val primaryKey = eventColumns.filter { it.third > 0 }.map { it.first }
+            assertEquals(listOf("conversation_id", "seq"), primaryKey)
+            val required = eventColumns.filter { it.first in setOf("conversation_id", "seq", "event_id", "type", "schema_version", "time", "ignorable", "data_json") }
+            assertTrue(required.all { it.second })
+            val optional = eventColumns.filter { it.first in setOf("surface_op_json", "source_seqs_json") }
+            assertTrue(optional.all { !it.second })
+
+            val uniqueIndexes = env.db.query(
+                "PRAGMA index_list(conversation_events)",
+                emptyList(),
+            ) { row -> (row.string(1) ?: "") to (row.int(2) != 0) }
+            assertTrue(
+                "event_id must be enforced unique for idempotent replay",
+                uniqueIndexes.any { (name, unique) -> unique && name == "idx_events_event_id" },
+            )
         }
     }
 

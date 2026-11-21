@@ -3,7 +3,9 @@ package com.deepseek.mobilechat.ui.chat
 import androidx.compose.runtime.Immutable
 import com.deepseek.mobilechat.application.AppError
 import com.deepseek.mobilechat.application.CompactionProposal
+import com.deepseek.mobilechat.application.log.BusyKind
 import com.deepseek.mobilechat.domain.Attachment
+import com.deepseek.mobilechat.domain.CompactionId
 import com.deepseek.mobilechat.domain.ContextInjection
 import com.deepseek.mobilechat.domain.Conversation
 import com.deepseek.mobilechat.domain.ConversationId
@@ -46,14 +48,50 @@ data class ActiveModel(
     val hasModel: Boolean get() = ref != null
 }
 
+/**
+ * One row of the transcript list.
+ *
+ * [Turn] is a message on the active path. While a turn streams, the snapshot's
+ * synthetic `STREAMING` assistant message is just another [Turn] — the engine
+ * owns its placement (and its `parentId`), so the UI never builds a row itself.
+ * [CompactionDivider] is the slim "N messages folded here" bar from
+ * `ChatSnapshot.transcript`; the covered [Turn]s stay above it.
+ */
+@Immutable
+sealed interface TranscriptRow {
+    @Immutable
+    data class Turn(val message: Message) : TranscriptRow
+
+    @Immutable
+    data class CompactionDivider(
+        val compactionId: CompactionId,
+        val coveredCount: Int,
+        val summary: String,
+        val tokensBefore: Int?,
+        val tokensAfter: Int?,
+    ) : TranscriptRow
+}
+
 @Immutable
 data class ChatUiState(
     /** `null` while the conversation is an unsaved draft (spec §2). */
     val conversationId: ConversationId? = null,
     val conversation: Conversation? = null,
+    /** Committed messages on the active path, in display order. */
     val messages: List<Message> = emptyList(),
+    /**
+     * What the transcript list renders: the same active-path messages plus the
+     * in-progress turn and compaction dividers, interleaved in transcript order.
+     */
+    val transcript: List<TranscriptRow> = emptyList(),
     val branches: Map<MessageId, BranchPosition> = emptyMap(),
+    /**
+     * Context injections for the top-bar badge. `ChatSnapshot` does not carry
+     * them, so the badge sees an empty list (the menu still opens the injections
+     * screen, which reads its own port). Kept for the existing screen shape.
+     */
     val injections: List<ContextInjection> = emptyList(),
+    /** A turn is streaming right now (`Overlay.streaming != null`). */
     val isGenerating: Boolean = false,
     /**
      * The visible branch ends at an unanswered user message (legacy fork data,
@@ -66,6 +104,8 @@ data class ChatUiState(
     /** "联网" toggle in the composer; off by default so nothing leaves the device unasked. */
     val searchEnabled: Boolean = false,
     val compactionProposal: CompactionProposal? = null,
+    /** `Overlay.busy`: which command is in flight, owned by the application layer. */
+    val busyKind: BusyKind? = null,
     val title: String = "新对话",
     val subtitle: String = "",
     /** Attachments staged for the next send; cleared once the message starts. */
@@ -75,7 +115,7 @@ data class ChatUiState(
     // ---- v2 draft conversation -------------------------------------------
     /** The composer's text. Lives here so it survives switching conversations. */
     val draftText: String = "",
-    /** First send of a draft is in flight (conversation is being created). */
+    /** A send (including creating the draft's conversation) is in flight. */
     val isSending: Boolean = false,
     val activeModel: ActiveModel = ActiveModel(),
     val thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
@@ -86,9 +126,9 @@ data class ChatUiState(
     /** Measured thinking time per message, filled live by the ViewModel. */
     val thinkingSeconds: Map<MessageId, Int> = emptyMap(),
     /**
-     * A conversation is selected but its first store emission has not arrived.
-     * Without this the screen flashes "这个会话还是空的" for one frame every time
-     * the user picks a conversation from the drawer.
+     * A conversation is selected but no `ChatSnapshot` for it has arrived yet.
+     * This is "the snapshot has not landed", not a second source of truth: it
+     * clears on the first snapshot, whatever that snapshot says.
      */
     val isLoadingConversation: Boolean = false,
 ) {
@@ -100,8 +140,8 @@ data class ChatUiState(
     val canSend: Boolean
         get() = draftText.isNotBlank() || pendingAttachments.isNotEmpty()
 
-    /** True while anything is in flight (generation, search, draft creation). */
-    val isBusy: Boolean get() = isGenerating || isSearching || isSending
+    /** True while anything is in flight (generation, search, any command). */
+    val isBusy: Boolean get() = isGenerating || isSearching || isSending || busyKind != null
 }
 
 /**

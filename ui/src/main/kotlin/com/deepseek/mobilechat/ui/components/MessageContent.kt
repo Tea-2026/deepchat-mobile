@@ -174,17 +174,21 @@ internal fun messageFooterState(message: Message): MessageFooterState {
     val interrupted = message.status == MessageStatus.CANCELLED
     val truncated = message.status == MessageStatus.COMPLETE &&
         message.finishReason == FinishReason.LENGTH
+    // 「继续生成」 needs assistant-prefix support in the protocol adapters, which
+    // the v2-log engine does not have yet. Until it does, every non-natural ending
+    // offers 「重试」 (a regenerate) instead of a button that silently does nothing.
+    // See _lead/ENGINEERING_NOTES.md §27 for the follow-up.
     return when {
-        failed -> MessageFooterState(MessageFooterMode.FAILED, canContinue = true, canRetry = true)
+        failed -> MessageFooterState(MessageFooterMode.FAILED, canContinue = false, canRetry = true)
         interrupted -> MessageFooterState(
             MessageFooterMode.INTERRUPTED,
-            canContinue = true,
-            canRetry = false,
+            canContinue = false,
+            canRetry = true,
         )
         truncated -> MessageFooterState(
             MessageFooterMode.TRUNCATED,
-            canContinue = true,
-            canRetry = false,
+            canContinue = false,
+            canRetry = true,
         )
         else -> MessageFooterState(MessageFooterMode.NONE, canContinue = false, canRetry = false)
     }

@@ -19,7 +19,6 @@ import com.deepseek.mobilechat.application.PresetStore
 import com.deepseek.mobilechat.application.ProviderProfileStore
 import com.deepseek.mobilechat.application.ProviderService
 import com.deepseek.mobilechat.application.SearchProviderKind
-import com.deepseek.mobilechat.application.SearchPort
 import com.deepseek.mobilechat.application.SearchService
 import com.deepseek.mobilechat.application.SettingsStore
 import com.deepseek.mobilechat.application.TransferService
@@ -34,6 +33,11 @@ import com.deepseek.mobilechat.application.service.DefaultConversationService
 import com.deepseek.mobilechat.application.service.DefaultGenerationQueue
 import com.deepseek.mobilechat.application.service.DefaultPresetService
 import com.deepseek.mobilechat.application.service.DefaultProviderService
+import com.deepseek.mobilechat.application.log.ChatGateway
+import com.deepseek.mobilechat.application.log.DefaultChatGateway
+import com.deepseek.mobilechat.application.SearchPort
+import com.deepseek.mobilechat.application.SearchResponse
+import com.deepseek.mobilechat.application.Outcome
 import com.deepseek.mobilechat.application.UsageAggregateStore
 import com.deepseek.mobilechat.application.UsageService
 import com.deepseek.mobilechat.application.service.DefaultSearchService
@@ -51,6 +55,10 @@ import com.deepseek.mobilechat.data.local.store.SqliteConversationStore
 import com.deepseek.mobilechat.data.local.store.SqliteFolderTagStore
 import com.deepseek.mobilechat.data.local.store.SqliteInjectionStore
 import com.deepseek.mobilechat.data.local.store.SqliteMessageStore
+import com.deepseek.mobilechat.data.local.log.ConversationProjector
+import com.deepseek.mobilechat.data.local.log.SqliteConversationSnapshotCache
+import com.deepseek.mobilechat.data.local.store.SqliteConversationLogStore
+import com.deepseek.mobilechat.data.local.store.SqliteTurnDraftStore
 import com.deepseek.mobilechat.data.local.store.SqliteUsageAggregateStore
 import com.deepseek.mobilechat.data.local.store.SqlitePresetStore
 import com.deepseek.mobilechat.data.local.store.SqliteProviderProfileStore
@@ -116,6 +124,49 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
         SqliteConversationStore(db, bus)
     }
     override val messageStore: MessageStore by lazy { SqliteMessageStore(db, bus) }
+
+    // ---- v2-log: append-only conversation events -------------------------
+    // `conversations` stays the query index (title, folder, ordering); the log is
+    // the truth for history. See docs/architecture-v2-log.md.
+
+    private val conversationLogStore by lazy { SqliteConversationLogStore(db, bus) }
+    private val turnDraftStore by lazy { SqliteTurnDraftStore(db, systemClock) }
+    private val conversationSnapshotCache by lazy { SqliteConversationSnapshotCache(db) }
+    private val conversationProjector by lazy {
+        ConversationProjector(conversationLogStore, conversationSnapshotCache)
+    }
+
+    /**
+     * The conversation engine. Everything the chat screen does goes through this:
+     * commands in, one immutable snapshot per log version out. The legacy
+     * `DefaultChatService` stays wired for the screens that still use it, but the
+     * chat path no longer writes to the old `messages` table.
+     */
+    override val chatGateway: ChatGateway by lazy {
+        DefaultChatGateway(
+            logStore = conversationLogStore,
+            draftStore = turnDraftStore,
+            conversationStore = conversationStore,
+            presetStore = presetStore,
+            providerProfileStore = providerStore,
+            attachmentStore = attachmentStore,
+            chatCompletion = chatCompletion,
+            searchPort = settingsSearchPort,
+            settingsStore = settings,
+            clock = systemClock,
+            idPort = ids,
+        )
+    }
+
+    /** The gateway wants one port; the app resolves the source from settings. */
+    private val settingsSearchPort: SearchPort = object : SearchPort {
+        override suspend fun isConfigured(): Boolean = true
+
+        override suspend fun search(
+            query: String,
+            options: com.deepseek.mobilechat.application.SearchOptions,
+        ): Outcome<SearchResponse> = search.webSearch(query)
+    }
 
     private val stalledGenerations by lazy {
         StalledGenerationReconciler(conversationStore, messageStore)

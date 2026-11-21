@@ -382,7 +382,7 @@ class MigrationTest {
     }
 
     @Test
-    fun v1DatabaseUpgradesStraightToV3IncludingTheBackfill() = runBlocking {
+    fun v1DatabaseUpgradesStraightToCurrentVersionIncludingTheBackfill() = runBlocking {
         TestEnv(schema = ::createV1Schema).use { env ->
             env.conversations.upsert(conversation("c1"))
 
@@ -410,7 +410,7 @@ class MigrationTest {
 
             Schema.migrate(env.db, fromVersion = 1)
 
-            assertEquals(3, env.db.userVersion())
+            assertEquals(Schema.VERSION, env.db.userVersion())
             assertUsageColumns(
                 env.db,
                 "m1",

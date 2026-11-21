@@ -18,6 +18,7 @@ import com.deepseek.mobilechat.application.ProviderProfileStore
 import com.deepseek.mobilechat.application.ProviderService
 import com.deepseek.mobilechat.application.SearchService
 import com.deepseek.mobilechat.application.TransferService
+import com.deepseek.mobilechat.application.log.ChatGateway
 import com.deepseek.mobilechat.application.UsageService
 
 /**
@@ -45,6 +46,12 @@ interface AppServices {
     val clock: ClockPort
     val fileImport: FileImportPort
     val usage: UsageService
+
+    /**
+     * The conversation engine. Screens must drive the chat through this and may
+     * not touch the stores: one snapshot per log version, commands for changes.
+     */
+    val chatGateway: ChatGateway
 }
 
 val LocalAppServices = staticCompositionLocalOf<AppServices> {

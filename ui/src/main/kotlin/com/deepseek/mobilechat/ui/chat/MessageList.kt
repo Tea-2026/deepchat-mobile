@@ -34,6 +34,12 @@ import com.deepseek.mobilechat.ui.theme.Spacing
 /**
  * The transcript.
  *
+ * The list renders [TranscriptRow]s, not a bare message list: the snapshot's
+ * transcript interleaves messages with compaction dividers, and keeping that
+ * order here is what lets the divider sit between the messages it covers. A
+ * streaming turn is an ordinary message row (the snapshot carries it with
+ * `status = STREAMING`), so the bubble/caret/scroll behaviour is unchanged.
+ *
  * Scrolling rules that matter for a streaming chat:
  *  - the view stays pinned to the bottom while the user has not scrolled away;
  *  - the moment the user drags, auto-follow stops, and it resumes only after
@@ -46,11 +52,12 @@ import com.deepseek.mobilechat.ui.theme.Spacing
  *
  * Items are keyed by *parent*, not by message id: a regenerated reply replaces
  * its sibling in the same slot, which is what lets the row cross-slide between
- * branches instead of being torn down and recreated.
+ * branches instead of being torn down and recreated. A compaction divider is not
+ * a branch slot, so it gets its own key.
  */
 @Composable
 fun ChatMessageList(
-    messages: List<Message>,
+    transcript: List<TranscriptRow>,
     branches: Map<MessageId, BranchPosition>,
     listState: LazyListState,
     editing: MessageId?,
@@ -69,8 +76,10 @@ fun ChatMessageList(
     // Keeps the previous branch's message around long enough for the exit half
     // of the branch transition to render real content.
     val archive = remember { HashMap<MessageId, Message>() }
-    LaunchedEffect(messages) {
-        messages.forEach { archive[it.id] = it }
+    LaunchedEffect(transcript) {
+        transcript.forEach { row ->
+            if (row is TranscriptRow.Turn) archive[row.message.id] = row.message
+        }
     }
     // One stable lookup for every row: a lambda rebuilt per row (and therefore
     // per re-composition) would make every `MessageRow` non-skippable.
@@ -84,8 +93,13 @@ fun ChatMessageList(
 
     // Hoisted so the LazyColumn item provider does not get a fresh key function
     // on every recomposition of this composable.
-    val keyOf: (Message) -> Any = remember {
-        { message: Message -> slotKey(message) }
+    val keyOf: (TranscriptRow) -> Any = remember {
+        { row ->
+            when (row) {
+                is TranscriptRow.Turn -> slotKey(row.message)
+                is TranscriptRow.CompactionDivider -> "compaction:${row.compactionId.raw}"
+            }
+        }
     }
 
     Box(modifier = modifier) {
@@ -95,61 +109,74 @@ fun ChatMessageList(
             contentPadding = PaddingValues(vertical = Spacing.sm),
         ) {
             items(
-                items = messages,
+                items = transcript,
                 key = keyOf,
-            ) { message ->
-                val streaming = message.status == MessageStatus.STREAMING
+            ) { row ->
+                when (row) {
+                    is TranscriptRow.CompactionDivider -> CompactionDividerRow(
+                        row = row,
+                        modifier = Modifier.animateItem(),
+                    )
 
-                val firstAppearance = remember(message.id) { arrived.add(message.id) }
-                val entrance = if (firstAppearance) {
-                    Modifier.messageEnter(key = message.id)
-                } else {
-                    Modifier
-                }
+                    is TranscriptRow.Turn -> {
+                        val message = row.message
+                        val streaming = message.status == MessageStatus.STREAMING
 
-                // `animateItem()` animates *placement* deltas between layouts. On
-                // the streaming row the height changes on every token while the
-                // follower is moving the scroll offset, and Compose only disables
-                // that animation pass for its own `animateScrollToItem` (via
-                // `skipItemPlacementAnimation`), which we no longer use. A row
-                // that is still being written has nothing to animate: gate the
-                // item animation on the message being finished.
-                val itemAnimation = remember(streaming) {
-                    if (streaming) Modifier else Modifier.animateItem()
-                }
+                        val firstAppearance = remember(message.id) { arrived.add(message.id) }
+                        val entrance = if (firstAppearance) {
+                            Modifier.messageEnter(key = message.id)
+                        } else {
+                            Modifier
+                        }
 
-                // Per-row callbacks must survive the token that changes
-                // `message.text`; they are keyed on the *id*, which does not.
-                val requestActions = remember(message.id, onRequestActions) {
-                    { onRequestActions(message.id) }
-                }
-                val saveEdit = remember(message.id, onSaveEdit) {
-                    { text: String -> onSaveEdit(message.id, text) }
-                }
-                val retry = remember(message.id, onRetry) {
-                    { onRetry(message.id) }
-                }
-                val continueGeneration = remember(message.id, onContinue) {
-                    { onContinue(message.id) }
-                }
+                        // `animateItem()` animates *placement* deltas between
+                        // layouts. On the streaming row the height changes on
+                        // every token while the follower is moving the scroll
+                        // offset, and Compose only disables that animation pass
+                        // for its own `animateScrollToItem` (via
+                        // `skipItemPlacementAnimation`), which we no longer use.
+                        // A row that is still being written has nothing to
+                        // animate: gate the item animation on the message being
+                        // finished.
+                        val itemAnimation = remember(streaming) {
+                            if (streaming) Modifier else Modifier.animateItem()
+                        }
 
-                MessageRow(
-                    message = message,
-                    branch = branches[message.id],
-                    resolveMessage = resolveMessage,
-                    modelName = modelName,
-                    protocol = protocol,
-                    thinkingSeconds = thinkingSeconds[message.id],
-                    activeProviderId = activeProviderId,
-                    editing = editing == message.id,
-                    onRequestActions = requestActions,
-                    onCancelEdit = onCancelEdit,
-                    onSaveEdit = saveEdit,
-                    onSwitchBranch = onSwitchBranch,
-                    onRetry = retry,
-                    onContinue = continueGeneration,
-                    modifier = itemAnimation.then(entrance),
-                )
+                        // Per-row callbacks must survive the token that changes
+                        // `message.text`; they are keyed on the *id*, which does
+                        // not.
+                        val requestActions = remember(message.id, onRequestActions) {
+                            { onRequestActions(message.id) }
+                        }
+                        val saveEdit = remember(message.id, onSaveEdit) {
+                            { text: String -> onSaveEdit(message.id, text) }
+                        }
+                        val retry = remember(message.id, onRetry) {
+                            { onRetry(message.id) }
+                        }
+                        val continueGeneration = remember(message.id, onContinue) {
+                            { onContinue(message.id) }
+                        }
+
+                        MessageRow(
+                            message = message,
+                            branch = branches[message.id],
+                            resolveMessage = resolveMessage,
+                            modelName = modelName,
+                            protocol = protocol,
+                            thinkingSeconds = thinkingSeconds[message.id],
+                            activeProviderId = activeProviderId,
+                            editing = editing == message.id,
+                            onRequestActions = requestActions,
+                            onCancelEdit = onCancelEdit,
+                            onSaveEdit = saveEdit,
+                            onSwitchBranch = onSwitchBranch,
+                            onRetry = retry,
+                            onContinue = continueGeneration,
+                            modifier = itemAnimation.then(entrance),
+                        )
+                    }
+                }
             }
         }
 

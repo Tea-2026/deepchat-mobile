@@ -92,11 +92,10 @@ fun MessageActionSheetContent(
                 onClick = onRegenerate,
             )
         }
-        SheetAction(
-            label = if (message.pinned) "取消置顶" else "置顶",
-            icon = { PinIcon(modifier = Modifier.iconSize(18.dp)) },
-            onClick = onPin,
-        )
+        // 置顶 / 删除 are hidden until the event log can express them
+        // (`message/pinned`, `message/deleted`). They used to write the legacy
+        // `messages` table, which the chat screen no longer reads, so they had
+        // become buttons that did nothing. See _lead/ENGINEERING_NOTES.md §27.
         if (canFork) {
             SheetAction(
                 label = "从此分支",
@@ -114,13 +113,6 @@ fun MessageActionSheetContent(
             color = chatColors.divider,
         ) {}
 
-        SheetAction(
-            label = "删除",
-            hint = "这条消息以及它之后的内容都会被删除",
-            destructive = true,
-            icon = { TrashIcon(modifier = Modifier.iconSize(18.dp)) },
-            onClick = onDelete,
-        )
     }
 }
 
