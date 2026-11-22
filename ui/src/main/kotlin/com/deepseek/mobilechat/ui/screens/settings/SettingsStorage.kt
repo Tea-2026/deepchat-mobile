@@ -1,6 +1,7 @@
 package com.deepseek.mobilechat.ui.screens.settings
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -52,7 +53,9 @@ internal fun appVersionName(context: Context): String? = runCatching {
     val app = context.applicationContext
     @Suppress("DEPRECATION")
     val info = app.packageManager.getPackageInfo(app.packageName, 0)
-    info.versionName
+    val flags = info.applicationInfo?.flags ?: 0
+    val verbose = if (flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) " · debug" else ""
+    "${info.versionName}$verbose"
 }.getOrNull()
 
 /** The three values `AppSettings.themeMode` accepts, as the user sees them. */

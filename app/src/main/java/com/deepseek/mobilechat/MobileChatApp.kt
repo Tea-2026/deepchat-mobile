@@ -11,8 +11,10 @@ class MobileChatApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
-        // A previous process may have died mid-stream: settle those rows before
-        // the user can interact with them (runs off the main thread).
-        container.reconcileStalledGenerations()
+        // Startup does no scanning here on purpose: the conversation engine
+        // settles its own interrupted turns when it is first touched, and the
+        // legacy `messages` table is no longer read for history. (The previous
+        // startup pass ran one query per message of every conversation on every
+        // launch — dead work that competed with the UI's own database reads.)
     }
 }

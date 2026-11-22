@@ -44,7 +44,6 @@ import com.deepseek.mobilechat.application.service.DefaultSearchService
 import com.deepseek.mobilechat.application.service.DefaultUsageService
 import com.deepseek.mobilechat.application.service.DefaultTransferService
 import com.deepseek.mobilechat.application.service.ModelCatalogCache
-import com.deepseek.mobilechat.application.service.StalledGenerationReconciler
 import com.deepseek.mobilechat.data.local.bus.ChangeBus
 import com.deepseek.mobilechat.data.local.db.AndroidDb
 import com.deepseek.mobilechat.data.local.db.AppDatabaseHelper
@@ -110,9 +109,6 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
     private val tokenEstimator = HeuristicTokenEstimator()
     private val budgetLookup = ConstantModelBudgetLookup()
 
-    /** Owns startup-only work (database recovery) without blocking the first frame. */
-    private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     override val clock: com.deepseek.mobilechat.application.ClockPort get() = systemClock
     override val settingsStore: SettingsStore get() = settings
     override val secretStore: com.deepseek.mobilechat.application.SecretStore get() = secrets
@@ -168,9 +164,6 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
         ): Outcome<SearchResponse> = search.webSearch(query)
     }
 
-    private val stalledGenerations by lazy {
-        StalledGenerationReconciler(conversationStore, messageStore)
-    }
     override val presetStore: PresetStore by lazy { SqlitePresetStore(db, bus) }
     override val providerStore: ProviderProfileStore by lazy {
         SqliteProviderProfileStore(db, bus)
@@ -281,20 +274,6 @@ class AppContainer(context: Context) : AppServices, SettingsCapability {
             attachmentStore = attachmentStore,
             strategies = strategies,
         )
-    }
-
-    /**
-     * Settles assistant rows left `STREAMING` by the previous process death.
-     *
-     * The queue lives in memory, so nothing can be running at this point; an
-     * unfinished row is orphaned by definition. Runs on [startupScope] so
-     * opening SQLite never delays the first frame, and a recovery failure must
-     * not stop the app from launching.
-     */
-    fun reconcileStalledGenerations() {
-        startupScope.launch {
-            runCatching { stalledGenerations.reconcile() }
-        }
     }
 
     override val context: ContextService by lazy {
