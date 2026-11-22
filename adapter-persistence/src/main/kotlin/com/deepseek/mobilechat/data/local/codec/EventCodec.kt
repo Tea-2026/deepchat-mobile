@@ -138,6 +138,16 @@ object EventCodec {
             put("placeholder", data.placeholder)
         }
 
+        is EventData.MessagePinned -> buildJsonObject {
+            put("messageId", data.messageId.raw)
+            // Written unconditionally: `false` is a pin state, not an omission.
+            put("pinned", data.pinned)
+        }
+
+        is EventData.MessageDeleted -> buildJsonObject {
+            put("messageId", data.messageId.raw)
+        }
+
         is EventData.LeafChanged -> buildJsonObject {
             put("messageId", data.messageId?.let { JsonPrimitive(it.raw) } ?: JsonNull)
         }
@@ -242,6 +252,15 @@ object EventCodec {
                 attachmentIds = obj.arrayOrNull("attachmentIds")?.strings()?.map(::AttachmentId)
                     ?: emptyList(),
                 placeholder = obj.requiredString("placeholder"),
+            )
+
+            EventType.MESSAGE_PINNED -> EventData.MessagePinned(
+                messageId = MessageId(obj.requiredString("messageId")),
+                pinned = obj.requiredBoolean("pinned"),
+            )
+
+            EventType.MESSAGE_DELETED -> EventData.MessageDeleted(
+                messageId = MessageId(obj.requiredString("messageId")),
             )
 
             EventType.LEAF_CHANGED -> EventData.LeafChanged(
@@ -361,6 +380,9 @@ object EventCodec {
 
     private fun JsonObject.requiredLong(key: String): Long =
         longOrNull(key) ?: throw IllegalArgumentException("missing number field '$key'")
+
+    private fun JsonObject.requiredBoolean(key: String): Boolean =
+        booleanOrNull(key) ?: throw IllegalArgumentException("missing boolean field '$key'")
 
     private inline fun <reified E : Enum<E>> parseEnum(value: String, field: String): E =
         try {

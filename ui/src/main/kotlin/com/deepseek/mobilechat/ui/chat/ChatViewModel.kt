@@ -64,8 +64,8 @@ import kotlinx.coroutines.withContext
  *
  * What remains on [AppServices] is deliberately *not* chat history: provider and
  * preset lists for the model chip, conversation overrides (the gateway has no
- * command for them), attachments, title refresh and the non-gateway commands
- * (`delete`, `pin`, `continueGeneration` — see the KDoc on each).
+ * command for them), attachments, title refresh and the one non-gateway command
+ * (`continueGeneration`, which the gateway cannot express yet — see its KDoc).
  *
  * **Draft conversations** (spec §2): [conversationId] may be `null`. In that mode
  * the screen consumes [ChatGateway.draftSnapshot] (an empty placeholder); the
@@ -453,24 +453,36 @@ class ChatViewModel(
     }
 
     /**
-     * Deleting a subtree and pinning are not part of the gateway contract yet, so
-     * these two keep going through [com.deepseek.mobilechat.application.ChatService].
-     * Reported rather than replaced with an invented command.
+     * Tombstones [messageId] and everything below it through the gateway.
+     *
+     * Destructive and immediate: the sheet's hint is the confirmation, so there is
+     * no second dialog. Nothing is removed from the rendered list by hand — the
+     * gateway settles the whole subtree in one log transaction and the next
+     * snapshot is what takes the rows away. Deleting the last message therefore
+     * lands on a snapshot with no messages and a null leaf, which renders as the
+     * normal empty state (never a blank transcript).
      */
     fun delete(messageId: MessageId) {
         viewModelScope.launch {
-            when (val outcome = services.chat.deleteSubtree(messageId)) {
+            when (val outcome = gateway.deleteMessage(messageId)) {
                 is Outcome.Ok -> _notices.tryEmit("已删除")
                 is Outcome.Err -> handleError(outcome.error)
             }
         }
     }
 
+    /**
+     * Flips the pin on one message.
+     *
+     * The current value is read from the snapshot (`Message.pinned`), never kept
+     * locally, so the toggle can never fire against a stale copy; the new value
+     * comes back on the next snapshot like every other piece of chat state.
+     */
     fun pin(messageId: MessageId) {
-        val current = _state.value.messages.firstOrNull { it.id == messageId } ?: return
+        val current = snapshot?.messages?.firstOrNull { it.id == messageId } ?: return
         val target = !current.pinned
         viewModelScope.launch {
-            when (val outcome = services.chat.setPinned(messageId, target)) {
+            when (val outcome = gateway.setPinned(messageId, target)) {
                 is Outcome.Ok -> _notices.tryEmit(if (target) "已置顶" else "已取消置顶")
                 is Outcome.Err -> handleError(outcome.error)
             }

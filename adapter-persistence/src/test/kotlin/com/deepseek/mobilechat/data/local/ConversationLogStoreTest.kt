@@ -213,6 +213,9 @@ class ConversationLogStoreTest {
     fun logDecodesEveryPayloadItWrote() = runBlocking {
         TestEnv().use { env ->
             val samples = eventSamples()
+            // The fixture claims one event per type; enforce that so a new
+            // EventType cannot silently skip the store round-trip.
+            assertEquals(EventType.entries.toSet(), samples.map { it.first }.toSet())
             env.log.append(cid, samples.map { it.second }).unwrap()
 
             val log = env.log.log(cid)
@@ -251,6 +254,63 @@ class ConversationLogStoreTest {
             assertEquals(SurfaceOp.Replace(1, 2), replace.surfaceOp)
             assertEquals(listOf(1L, 2L), replace.sourceEventSeqs)
             assertEquals(CompactionId("cp1"), (replace.data as EventData.UserMessage).compactionId)
+        }
+    }
+
+    @Test
+    fun appendStoresPinAndDeleteAsRecordEventsWithNullSurfaceOps() = runBlocking {
+        TestEnv().use { env ->
+            env.log.append(cid, listOf(userEvent("u1"), assistantEvent("a1", "u1"))).unwrap()
+
+            val version = env.log.append(
+                cid,
+                listOf(
+                    PendingEvent(
+                        eventId = "e-pin",
+                        type = EventType.MESSAGE_PINNED,
+                        time = 3_000,
+                        data = EventData.MessagePinned(MessageId("u1"), pinned = true),
+                    ),
+                    PendingEvent(
+                        eventId = "e-delete",
+                        type = EventType.MESSAGE_DELETED,
+                        time = 3_100,
+                        data = EventData.MessageDeleted(MessageId("a1")),
+                    ),
+                ),
+            ).unwrap()
+            assertEquals(4L, version)
+
+            val log = env.log.log(cid)
+            assertEquals(listOf(1L, 2L, 3L, 4L), log.events.map { it.seq })
+
+            val pin = log.events[2]
+            val deleted = log.events[3]
+            assertEquals(EventType.MESSAGE_PINNED, pin.type)
+            assertEquals(EventData.MessagePinned(MessageId("u1"), pinned = true), pin.data)
+            assertEquals(EventType.MESSAGE_DELETED, deleted.type)
+            assertEquals(EventData.MessageDeleted(MessageId("a1")), deleted.data)
+            // Record events must come back with no surface columns, or
+            // `SessionEvent.validate()` would reject the read-back.
+            assertNull(pin.surfaceOp)
+            assertNull(deleted.surfaceOp)
+            assertTrue(pin.sourceEventSeqs.isEmpty())
+            assertTrue(deleted.sourceEventSeqs.isEmpty())
+
+            // Check the stored columns, not only the decoded values: the payload
+            // must be in data_json while surface_op_json stays SQL NULL.
+            val raw = env.db.query(
+                "SELECT type, surface_op_json, source_seqs_json, data_json FROM conversation_events " +
+                    "WHERE conversation_id = ? AND seq >= 3 ORDER BY seq",
+                listOf(cid.raw),
+            ) { row -> listOf(row.string(0), row.string(1), row.string(2), row.string(3)) }
+            assertEquals(
+                listOf(
+                    listOf("message/pinned", null, null, """{"messageId":"u1","pinned":true}"""),
+                    listOf("message/deleted", null, null, """{"messageId":"a1"}"""),
+                ),
+                raw,
+            )
         }
     }
 
@@ -407,6 +467,14 @@ class ConversationLogStoreTest {
         EventType.IMAGE_OFFLOAD to PendingEvent(
             "e-offload", EventType.IMAGE_OFFLOAD, 2_100,
             EventData.ImageOffload(MessageId("a1"), listOf(com.deepseek.mobilechat.domain.AttachmentId("att")), "gone"),
+        ),
+        EventType.MESSAGE_PINNED to PendingEvent(
+            "e-pinned", EventType.MESSAGE_PINNED, 2_150,
+            EventData.MessagePinned(MessageId("u1"), pinned = false),
+        ),
+        EventType.MESSAGE_DELETED to PendingEvent(
+            "e-deleted", EventType.MESSAGE_DELETED, 2_160,
+            EventData.MessageDeleted(MessageId("a1")),
         ),
         EventType.LEAF_CHANGED to PendingEvent(
             "e-leaf", EventType.LEAF_CHANGED, 2_200,

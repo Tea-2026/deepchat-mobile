@@ -1,5 +1,6 @@
 package com.deepseek.mobilechat.ui.chat
 
+import com.deepseek.mobilechat.application.AppError
 import com.deepseek.mobilechat.application.AttachmentStore
 import com.deepseek.mobilechat.application.ChatService
 import com.deepseek.mobilechat.application.ClockPort
@@ -319,6 +320,119 @@ class ChatViewModelConversationSwitchTest {
     }
 
     // -----------------------------------------------------------------------
+    // Message commands: pin / delete go through the gateway only
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `pin and delete are gateway commands, not legacy chat service calls`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val user = message(a, "a-user", null, "A question", 1)
+            val reply = message(a, "a-reply", "a-user", "A answer", 2)
+            val gateway = FakeGateway(initial = mapOf(a to snapshot(a, listOf(user, reply), reply.id)))
+            // `FakeAppServices.chat` fails loudly, so falling back to the legacy
+            // service would fail this test instead of passing silently.
+            val viewModel = ChatViewModel(
+                services = FakeAppServices(
+                    conversations = mapOf(a.raw to conversation(a, reply.id, "A")),
+                ),
+                gateway = gateway,
+                conversationId = a,
+            )
+            advanceUntilIdle()
+
+            val notices = mutableListOf<String>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                viewModel.notices.collect { notices += it }
+            }
+
+            viewModel.pin(reply.id)
+            advanceUntilIdle()
+            // The second tap must unpin: the direction is read from the snapshot
+            // the fake gateway just published, never from a local flag.
+            viewModel.pin(reply.id)
+            advanceUntilIdle()
+            viewModel.delete(user.id)
+            advanceUntilIdle()
+
+            assertEquals(
+                listOf(MessageId("a-reply") to true, MessageId("a-reply") to false),
+                gateway.pinCalls,
+            )
+            assertEquals(listOf(MessageId("a-user")), gateway.deleteCalls)
+            assertEquals(listOf("已置顶", "已取消置顶", "已删除"), notices)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `deleting the last message lands on the empty conversation state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val only = message(a, "a-only", null, "Only message", 1)
+            val gateway = FakeGateway(initial = mapOf(a to snapshot(a, listOf(only), only.id)))
+            val viewModel = ChatViewModel(
+                services = FakeAppServices(
+                    conversations = mapOf(a.raw to conversation(a, only.id, "A")),
+                ),
+                gateway = gateway,
+                conversationId = a,
+            )
+            advanceUntilIdle()
+            assertEquals(listOf("Only message"), viewModel.state.value.messages.map { it.text })
+
+            // What the engine publishes after the tombstone: no messages, no leaf.
+            gateway.onDelete = { gateway.emit(a, snapshot(a, emptyList(), null)) }
+
+            viewModel.delete(only.id)
+            advanceUntilIdle()
+
+            val state = viewModel.state.value
+            assertTrue("transcript must be empty", state.transcript.isEmpty())
+            assertTrue("the screen falls back to the empty state", state.isEmpty)
+            // Empty, but still a real conversation: the composer stays usable and
+            // the empty state says so instead of pretending it is a fresh draft.
+            assertEquals(a, state.conversationId)
+            assertFalse(state.isDraft)
+            assertFalse("an empty snapshot is loaded, not loading", state.isLoadingConversation)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a failed delete is reported on the error channel and drops nothing`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val only = message(a, "a-only", null, "Only message", 1)
+            val gateway = FakeGateway(initial = mapOf(a to snapshot(a, listOf(only), only.id)))
+            val viewModel = ChatViewModel(
+                services = FakeAppServices(
+                    conversations = mapOf(a.raw to conversation(a, only.id, "A")),
+                ),
+                gateway = gateway,
+                conversationId = a,
+            )
+            advanceUntilIdle()
+
+            val errors = mutableListOf<String>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                viewModel.errors.collect { errors += it }
+            }
+
+            gateway.deleteResult = Outcome.Err(AppError.Storage("disk full"))
+            viewModel.delete(only.id)
+            advanceUntilIdle()
+
+            assertEquals(listOf("本地存储读写失败"), errors)
+            assertEquals(listOf("Only message"), viewModel.state.value.messages.map { it.text })
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Fakes
     // -----------------------------------------------------------------------
 
@@ -331,6 +445,12 @@ class ChatViewModelConversationSwitchTest {
         private val draft = MutableStateFlow(emptyDraft())
 
         var onDismiss: ((ConversationId) -> Unit)? = null
+        var onDelete: ((MessageId) -> Unit)? = null
+        var deleteResult: Outcome<Unit> = Outcome.Ok(Unit)
+
+        /** Every `setPinned` / `deleteMessage` the ViewModel sent, in order. */
+        val pinCalls = mutableListOf<Pair<MessageId, Boolean>>()
+        val deleteCalls = mutableListOf<MessageId>()
 
         fun emit(id: ConversationId, snapshot: ChatSnapshot) {
             streams.getValue(id).value = snapshot
@@ -355,6 +475,28 @@ class ChatViewModelConversationSwitchTest {
         override suspend fun edit(messageId: MessageId, text: String): Outcome<EditOutcome> = unused()
 
         override suspend fun switchBranch(messageId: MessageId): Outcome<Unit> = unused()
+
+        override suspend fun setPinned(messageId: MessageId, pinned: Boolean): Outcome<Unit> {
+            pinCalls += messageId to pinned
+            // Stand-in for the engine: the pin comes back through the snapshot,
+            // which is what lets a second tap read the flipped value.
+            streams.values.forEach { stream ->
+                val current = stream.value
+                if (current.messages.none { it.id == messageId }) return@forEach
+                stream.value = current.copy(
+                    messages = current.messages.map { message ->
+                        if (message.id == messageId) message.copy(pinned = pinned) else message
+                    },
+                )
+            }
+            return Outcome.Ok(Unit)
+        }
+
+        override suspend fun deleteMessage(messageId: MessageId): Outcome<Unit> {
+            deleteCalls += messageId
+            if (deleteResult is Outcome.Ok) onDelete?.invoke(messageId)
+            return deleteResult
+        }
 
         override suspend fun cancel(conversationId: ConversationId): Outcome<Unit> = unused()
 

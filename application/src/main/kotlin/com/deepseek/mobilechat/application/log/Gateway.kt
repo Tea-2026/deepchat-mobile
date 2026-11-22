@@ -195,6 +195,15 @@ interface ChatGateway {
 
     suspend fun switchBranch(messageId: MessageId): Outcome<Unit>
 
+    /** Pins or unpins one message. Presentation only; the prompt is untouched. */
+    suspend fun setPinned(messageId: MessageId, pinned: Boolean): Outcome<Unit>
+
+    /**
+     * Tombstones [messageId] and every descendant of it, then moves the leaf to the
+     * nearest surviving ancestor. Nothing is physically removed from the log.
+     */
+    suspend fun deleteMessage(messageId: MessageId): Outcome<Unit>
+
     suspend fun cancel(conversationId: ConversationId): Outcome<Unit>
 
     /** Applies the pending compaction proposal, then resends the held text. */

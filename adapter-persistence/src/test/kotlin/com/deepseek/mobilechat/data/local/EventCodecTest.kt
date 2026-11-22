@@ -157,6 +157,40 @@ class EventCodecTest {
     }
 
     @Test
+    fun messagePinnedWritesAndRoundTripsBothBooleanValues() {
+        val pinned = EventData.MessagePinned(MessageId("m1"), pinned = true)
+        val unpinned = EventData.MessagePinned(MessageId("m1"), pinned = false)
+
+        val pinnedJson = EventCodec.encodeData(pinned)
+        val unpinnedJson = EventCodec.encodeData(unpinned)
+
+        assertEquals("""{"messageId":"m1","pinned":true}""", pinnedJson)
+        assertEquals("""{"messageId":"m1","pinned":false}""", unpinnedJson)
+
+        assertEquals(pinned, EventCodec.decodeData(EventType.MESSAGE_PINNED, pinnedJson))
+        // `false` is a written value, not an absent one: a decoder that fell back
+        // to a default would turn a deliberate unpin into a silent pin.
+        assertEquals(unpinned, EventCodec.decodeData(EventType.MESSAGE_PINNED, unpinnedJson))
+
+        // Omitting the flag is corruption, not "unpinned".
+        assertThrows(IllegalArgumentException::class.java) {
+            EventCodec.decodeData(EventType.MESSAGE_PINNED, """{"messageId":"m1"}""")
+        }
+    }
+
+    @Test
+    fun messageDeletedRoundTripsItsMessageId() {
+        val data = EventData.MessageDeleted(MessageId("m1"))
+        val json = EventCodec.encodeData(data)
+
+        assertEquals("""{"messageId":"m1"}""", json)
+        assertEquals(data, EventCodec.decodeData(EventType.MESSAGE_DELETED, json))
+        assertThrows(IllegalArgumentException::class.java) {
+            EventCodec.decodeData(EventType.MESSAGE_DELETED, "{}")
+        }
+    }
+
+    @Test
     fun decodingRejectsAPayloadThatDoesNotMatchTheType() {
         val systemJson = EventCodec.encodeData(EventData.SystemMessage("system"))
         assertThrows(IllegalArgumentException::class.java) {
@@ -226,6 +260,8 @@ class EventCodecTest {
             listOf(AttachmentId("img-1"), AttachmentId("img-2")),
             "[image removed]",
         ),
+        EventType.MESSAGE_PINNED to EventData.MessagePinned(MessageId("u1"), pinned = true),
+        EventType.MESSAGE_DELETED to EventData.MessageDeleted(MessageId("a1")),
         EventType.LEAF_CHANGED to EventData.LeafChanged(MessageId("a1")),
         EventType.MODEL_SELECTION to EventData.ModelSelection(
             ModelRef(ProviderId("prov"), ModelId("model")),

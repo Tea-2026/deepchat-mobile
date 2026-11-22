@@ -408,4 +408,56 @@ class SurfaceFoldTest {
         assertEquals(com.deepseek.mobilechat.domain.ThinkingLevel.OFF, transcript.thinkingLevel)
         assertNull(transcript.activeLeafId)
     }
+
+    @Test
+    fun `pinning only changes the transcript row`() {
+        val events = arrayOf(
+            user(1, "u1"),
+            assistant(2, "a1", "u1"),
+            ev(3, EventType.MESSAGE_PINNED, EventData.MessagePinned(MessageId("u1"), pinned = true)),
+        )
+
+        val transcript = TranscriptProjector.project(log(*events))
+        val surface = SurfaceFolder.fold(log(*events))
+
+        assertTrue("the row is pinned", transcript.message(MessageId("u1"))!!.pinned)
+        assertEquals("pinning must not change the prompt", 2, surface.nodes.size)
+    }
+
+    @Test
+    fun `a deleted message leaves both projections`() {
+        val events = arrayOf(
+            user(1, "u1"),
+            assistant(2, "a1", "u1"),
+            ev(3, EventType.MESSAGE_DELETED, EventData.MessageDeleted(MessageId("u1"))),
+            ev(4, EventType.MESSAGE_DELETED, EventData.MessageDeleted(MessageId("a1"))),
+        )
+
+        val transcript = TranscriptProjector.project(log(*events))
+        val surface = SurfaceFolder.fold(log(*events))
+
+        assertTrue("nothing is left to show", transcript.messages.isEmpty())
+        assertTrue("nothing is left to send", surface.nodes.isEmpty())
+    }
+
+    @Test
+    fun `deleting the last exchange keeps the earlier ones`() {
+        val events = arrayOf(
+            user(1, "u1"),
+            assistant(2, "a1", "u1"),
+            user(3, "u2", parent = "a1"),
+            assistant(4, "a2", "u2"),
+            ev(5, EventType.MESSAGE_DELETED, EventData.MessageDeleted(MessageId("u2"))),
+            ev(6, EventType.MESSAGE_DELETED, EventData.MessageDeleted(MessageId("a2"))),
+        )
+
+        val transcript = TranscriptProjector.project(log(*events))
+        val surface = SurfaceFolder.fold(log(*events))
+
+        assertEquals(listOf("u1", "a1"), transcript.messages.map { it.id.raw })
+        assertEquals(
+            listOf(EventType.USER_MESSAGE, EventType.ASSISTANT_MESSAGE),
+            surface.nodes.map { it.type },
+        )
+    }
 }

@@ -42,6 +42,7 @@ import com.deepseek.mobilechat.domain.MessageId
 import com.deepseek.mobilechat.domain.MessagePart
 import com.deepseek.mobilechat.domain.MessageRole
 import com.deepseek.mobilechat.domain.MessageStatus
+import com.deepseek.mobilechat.domain.MessageTree
 import com.deepseek.mobilechat.domain.ModelInfo
 import com.deepseek.mobilechat.domain.Preset
 import com.deepseek.mobilechat.domain.SearchHit
@@ -90,6 +91,8 @@ const val DRAFT_CONVERSATION_ID_RAW: String = "draft"
  * | `edit` (no child)   | `user/message`(Replace same id) + `turn/start`                            |
  * | `edit` (has child)  | `user/message`(Append sibling) + `leaf/changed` + `turn/start`            |
  * | `switchBranch`      | `leaf/changed`                                                            |
+ * | `setPinned`         | `message/pinned` (nothing at all when the flag already matches)           |
+ * | `deleteMessage`     | `message/deleted` × subtree + `leaf/changed`                               |
  * | `confirmCompaction` | `compaction/start` + stand-in `user/message`(Replace) + `compaction/end`  |
  * | turn completion     | `assistant/message`(Append) + `turn/end` + `leaf/changed`                 |
  * | turn failure/cancel | `turn/interrupted` + `leaf/changed`                                       |
@@ -703,6 +706,172 @@ class DefaultChatGateway(
         }
     }
 
+    // -----------------------------------------------------------------------
+    // setPinned / deleteMessage
+    // -----------------------------------------------------------------------
+
+    /**
+     * Pins or unpins one message: exactly one `message/pinned` record event, or
+     * **nothing at all** when the flag already has the requested value.
+     *
+     * Idempotency is deliberate: the log records *state changes*, not user
+     * gestures. Appending `message/pinned(true)` again would bump the version and
+     * grow the log for a double tap, while replaying it produces byte-for-byte
+     * the same transcript — a no-op is not an event. The decision is observable:
+     * the second call returns `Ok` with no append.
+     *
+     * No index patch is written: pinned state lives only in the log (the
+     * conversation row keeps its `activeLeafId`), and a presentation-only change
+     * does not bump `updatedAt` in the conversation list.
+     */
+    override suspend fun setPinned(messageId: MessageId, pinned: Boolean): Outcome<Unit> {
+        val conversationId = conversationOf(messageId)
+            ?: return Outcome.Err(AppError.Validation("message not found: ${messageId.raw}"))
+        return withBusy(conversationId, BusyKind.SWITCH) {
+            // Read → decide → append under the append lock, so two concurrent
+            // pins of the same message cannot both observe "not pinned yet".
+            appendMutex.withLock {
+                val log = cacheMutex.withLock { readLogFreshLocked(conversationId) }
+                val message = TranscriptProjector.project(log).messages
+                    .firstOrNull { it.id == messageId }
+                    ?: return@withLock Outcome.Err(
+                        AppError.Validation("message not found: ${messageId.raw}"),
+                    )
+                if (message.pinned == pinned) return@withLock Outcome.Ok(Unit)
+                val now = clock.nowMillis()
+                appendWithinLock(
+                    conversationId = conversationId,
+                    events = listOf(
+                        PendingEvent(
+                            eventId = idPort.newId(),
+                            type = EventType.MESSAGE_PINNED,
+                            time = now,
+                            data = EventData.MessagePinned(messageId, pinned),
+                        ),
+                    ),
+                    index = null,
+                ).map { Unit }
+            }
+        }
+    }
+
+    /**
+     * Tombstones [messageId] and every descendant, then re-asserts the leaf.
+     *
+     * One batch, in this order:
+     *  1. `message/deleted` for the target and every descendant (tree order,
+     *     root first) — nothing is physically removed, the tombstones are what
+     *     the folds filter on;
+     *  2. exactly one `leaf/changed`, plus the same `activeLeafId` in the index
+     *     patch. When the target carries the current leaf the leaf moves to the
+     *     nearest surviving ancestor (the whole conversation may go: then it is
+     *     `null`). When it does not — deleting an old branch — the current leaf
+     *     is re-asserted unchanged, so removing something the user is *not*
+     *     looking at never yanks the branch on screen.
+     *
+     * Refused, without appending anything, when the message does not exist
+     * ([AppError.Validation]) or when a turn is in flight under it
+     * ([AppError.BranchConflict]): the runner would otherwise land its answer
+     * beneath a tombstone, so this command does not fight it.
+     */
+    override suspend fun deleteMessage(messageId: MessageId): Outcome<Unit> {
+        val conversationId = conversationOf(messageId)
+            ?: return Outcome.Err(AppError.Validation("message not found: ${messageId.raw}"))
+        return withBusy(conversationId, BusyKind.EDIT) {
+            // The batch is computed from the log, so it must be computed under
+            // the same lock as the append: a concurrent terminal write of a turn
+            // can then not move the leaf between the read and the write.
+            appendMutex.withLock {
+                val log = cacheMutex.withLock { readLogFreshLocked(conversationId) }
+                val transcript = TranscriptProjector.project(log)
+                val tree = MessageTree.from(transcript.messages)
+                if (!tree.contains(messageId)) {
+                    return@withLock Outcome.Err(
+                        AppError.Validation("message not found: ${messageId.raw}"),
+                    )
+                }
+                val doomed = tree.subtreeOf(messageId)
+
+                val inFlight = streamingTurns[conversationId]
+                val streamingParent = inFlight?.parentId
+                if (inFlight != null &&
+                    (inFlight.messageId == messageId || (streamingParent != null && streamingParent in doomed))
+                ) {
+                    return@withLock Outcome.Err(
+                        AppError.BranchConflict(
+                            "cannot delete a message a turn is still streaming under",
+                        ),
+                    )
+                }
+
+                val currentLeaf = transcript.activeLeafId
+                val visibleIds = transcript.messages.mapTo(HashSet(transcript.messages.size)) { it.id }
+                // A leaf that is not in the visible transcript is already dead
+                // (a tombstone from an earlier write); re-asserting it would
+                // publish a path to a row the UI does not have.
+                val survivingLeaf = currentLeaf?.takeIf { it in visibleIds }
+                val leafAfter = when {
+                    survivingLeaf != null && survivingLeaf !in doomed -> survivingLeaf
+                    else -> survivingAncestor(log, visibleIds, messageId)
+                        ?: transcript.messages.lastOrNull { it.id !in doomed }?.id
+                }
+
+                val now = clock.nowMillis()
+                val events = ArrayList<PendingEvent>(doomed.size + 1)
+                doomed.forEach { id ->
+                    events += PendingEvent(
+                        eventId = idPort.newId(),
+                        type = EventType.MESSAGE_DELETED,
+                        time = now,
+                        data = EventData.MessageDeleted(id),
+                    )
+                }
+                events += PendingEvent(
+                    eventId = idPort.newId(),
+                    type = EventType.LEAF_CHANGED,
+                    time = now,
+                    data = EventData.LeafChanged(leafAfter),
+                )
+                appendWithinLock(
+                    conversationId = conversationId,
+                    events = events,
+                    index = ConversationIndexPatch(activeLeafId = leafAfter, updatedAt = now),
+                ).map { Unit }
+            }
+        }
+    }
+
+    /**
+     * The nearest ancestor of [messageId] still visible in the human transcript,
+     * or null when the removal took the whole conversation with it.
+     *
+     * Parent links are read from the *log*, not from the visible tree, so an
+     * ancestor that is already tombstoned cannot cut the walk short (the visible
+     * tree simply has no node for it).
+     */
+    private fun survivingAncestor(
+        log: ConversationLog,
+        visibleIds: Set<MessageId>,
+        messageId: MessageId,
+    ): MessageId? {
+        val parentOf = HashMap<MessageId, MessageId?>()
+        log.events.forEach { event ->
+            when (val data = event.data) {
+                is EventData.UserMessage -> parentOf[data.messageId] = data.parentId
+                is EventData.AssistantMessage -> parentOf[data.messageId] = data.parentId
+                is EventData.TurnInterrupted -> parentOf[data.messageId] = data.parentId
+                else -> Unit
+            }
+        }
+        var cursor = parentOf[messageId]
+        val seen = HashSet<MessageId>()
+        while (cursor != null && seen.add(cursor)) {
+            if (cursor in visibleIds) return cursor
+            cursor = parentOf[cursor]
+        }
+        return null
+    }
+
     override suspend fun cancel(conversationId: ConversationId): Outcome<Unit> =
         withBusy(conversationId, BusyKind.CANCEL) {
             val active = activeTurns[conversationId]
@@ -1006,10 +1175,42 @@ class DefaultChatGateway(
         }
 
         val messages = if (synthetic != null) transcript.messages + synthetic else transcript.messages
-        val nodes = if (synthetic != null) {
+        val rawNodes = if (synthetic != null) {
             transcript.nodes + TranscriptNode.MessageNode(seq = log.version + 1, message = synthetic)
         } else {
             transcript.nodes
+        }
+        // `TranscriptProjector` applies the `pinned` flag to `messages` only; the
+        // node list it returns still holds the pre-pin rows. A snapshot must not
+        // disagree with itself about one message, so carry the flag onto the
+        // nodes here — next to the synthetic row and the presentation leaf, which
+        // this class already owns as presentation concerns.
+        val pinnedById = transcript.messages.associate { it.id to it.pinned }
+        val nodes = rawNodes.map { node ->
+            if (node is TranscriptNode.MessageNode) {
+                val pinned = pinnedById[node.message.id]
+                if (pinned != null && pinned != node.message.pinned) {
+                    node.copy(message = node.message.copy(pinned = pinned))
+                } else {
+                    node
+                }
+            } else {
+                node
+            }
+        }
+
+        // The log's leaf can name a row a tombstone has since removed:
+        // `TranscriptProjector` falls back to "the last appended message" when it
+        // sees no leaf at all, and that message may be exactly what was deleted.
+        // A presentation leaf the UI cannot draw is not a leaf, so clamp it into
+        // the visible transcript — this is what makes "the whole conversation was
+        // deleted" read as a null leaf instead of a path to a missing row.
+        val logLeaf = transcript.activeLeafId
+        val visibleIds = transcript.messages.mapTo(HashSet(transcript.messages.size)) { it.id }
+        val presentationLeaf = when {
+            synthetic != null -> synthetic.id
+            logLeaf != null && logLeaf in visibleIds -> logLeaf
+            else -> transcript.messages.lastOrNull()?.id
         }
 
         return ChatSnapshot(
@@ -1020,7 +1221,7 @@ class DefaultChatGateway(
             // Presentation leaf: while streaming the UI must be able to walk
             // `pathTo(activeLeafId)` and land on the synthetic row. The log's
             // own leaf is untouched until the terminal batch lands (I10).
-            activeLeafId = synthetic?.id ?: transcript.activeLeafId,
+            activeLeafId = presentationLeaf,
             transcript = nodes,
             overlay = overlay,
             totals = projection.totals,

@@ -40,6 +40,8 @@ enum class EventType(val wire: String) {
     COMPACTION_END("compaction/end"),
     COMPACTION_PRUNE("compaction/prune"),
     IMAGE_OFFLOAD("image/offload"),
+    MESSAGE_PINNED("message/pinned"),
+    MESSAGE_DELETED("message/deleted"),
     LEAF_CHANGED("leaf/changed"),
     MODEL_SELECTION("model/selection"),
     SESSION_TITLE("session/title"),
@@ -164,6 +166,24 @@ sealed interface EventData {
         val placeholder: String,
     ) : EventData
 
+    /**
+     * Pins a message. A record event: it never changes the prompt, it only changes
+     * how the transcript is presented and ordered.
+     */
+    data class MessagePinned(val messageId: MessageId, val pinned: Boolean) : EventData
+
+    /**
+     * Tombstones a message.
+     *
+     * Record events cannot change the prompt *whose history they are*, but a
+     * deletion is the one case where the user's intent is exactly "this is no
+     * longer part of the conversation". The fold therefore filters tombstoned
+     * nodes out of the surface *after* replaying it — see `SurfaceFolder.fold` —
+     * and the transcript drops the same rows. Nothing is rewritten in the log, so
+     * the deletion itself stays auditable.
+     */
+    data class MessageDeleted(val messageId: MessageId) : EventData
+
     data class LeafChanged(val messageId: MessageId?) : EventData
 
     data class ModelSelection(
@@ -262,6 +282,8 @@ data class SessionEvent(
             EventType.COMPACTION_END -> data is EventData.CompactionEnd
             EventType.COMPACTION_PRUNE -> data is EventData.CompactionPrune
             EventType.IMAGE_OFFLOAD -> data is EventData.ImageOffload
+            EventType.MESSAGE_PINNED -> data is EventData.MessagePinned
+            EventType.MESSAGE_DELETED -> data is EventData.MessageDeleted
             EventType.LEAF_CHANGED -> data is EventData.LeafChanged
             EventType.MODEL_SELECTION -> data is EventData.ModelSelection
             EventType.SESSION_TITLE -> data is EventData.SessionTitle

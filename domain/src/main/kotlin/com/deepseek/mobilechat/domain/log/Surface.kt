@@ -39,7 +39,15 @@ data class SurfaceNode(
     val content: SurfaceContent,
     /** Set on a compaction stand-in so consumers can tell it from a typed message. */
     val compactionId: CompactionId? = null,
-)
+) {
+    /** The message this node row represents, when it is one. */
+    val messageId: com.deepseek.mobilechat.domain.MessageId?
+        get() = when (val it = content) {
+            is SurfaceContent.User -> it.message.id
+            is SurfaceContent.Assistant -> it.message.id
+            else -> null
+        }
+}
 
 /** Exactly what the model sees, in order. */
 data class Surface(val nodes: List<SurfaceNode>)
@@ -59,6 +67,7 @@ object SurfaceFolder {
 
     fun fold(log: ConversationLog): Surface {
         val nodes = ArrayList<SurfaceNode>()
+        val deleted = HashSet<com.deepseek.mobilechat.domain.MessageId>()
         var expected = 1L
         for (event in log.events) {
             if (event.seq != expected) {
@@ -67,6 +76,9 @@ object SurfaceFolder {
                 )
             }
             event.validate()
+            if (event.data is EventData.MessageDeleted) {
+                deleted += (event.data as EventData.MessageDeleted).messageId
+            }
             when (val op = event.surfaceOp) {
                 null -> Unit // record-only event: can never change the surface
                 SurfaceOp.Append -> nodes += nodeFor(event, log.conversationId)
@@ -74,7 +86,16 @@ object SurfaceFolder {
             }
             expected++
         }
-        return Surface(nodes)
+        // Tombstones are the one record event that filters the surface, and it
+        // happens after the replay so a deletion can never invalidate a replace
+        // that was already applied.
+        return Surface(
+            if (deleted.isEmpty()) {
+                nodes
+            } else {
+                nodes.filterNot { node -> node.messageId?.let { it in deleted } == true }
+            },
+        )
     }
 
     private fun applyReplace(
@@ -259,6 +280,8 @@ object TranscriptProjector {
         var thinking: ThinkingLevel? = null
         val pendingTokensBefore = HashMap<CompactionId, Int>()
         val pendingTokensAfter = HashMap<CompactionId, Int>()
+        val deleted = HashSet<MessageId>()
+        val pinned = HashMap<MessageId, Boolean>()
 
         var expected = 1L
         loop@ for (event in log.events) {
@@ -270,6 +293,8 @@ object TranscriptProjector {
 
             when (val data = event.data) {
                 is EventData.SessionTitle -> title = data.title
+                is EventData.MessageDeleted -> deleted += data.messageId
+                is EventData.MessagePinned -> pinned[data.messageId] = data.pinned
                 is EventData.LeafChanged -> leaf = data.messageId
                 is EventData.ModelSelection -> {
                     data.modelRef?.let { modelRef = it }
@@ -355,11 +380,26 @@ object TranscriptProjector {
             }
         }
 
+        val visible = if (deleted.isEmpty() && pinned.isEmpty()) {
+            messages
+        } else {
+            messages
+                .filterNot { it.id in deleted }
+                .map { message -> pinned[message.id]?.let { message.copy(pinned = it) } ?: message }
+        }
+        val visibleNodes = if (deleted.isEmpty()) {
+            finalNodes
+        } else {
+            finalNodes.filterNot { node ->
+                node is TranscriptNode.MessageNode && node.message.id in deleted
+            }
+        }
+
         return Transcript(
             conversationId = log.conversationId,
             title = title,
-            nodes = finalNodes,
-            messages = messages,
+            nodes = visibleNodes,
+            messages = visible,
             activeLeafId = leaf ?: messages.lastOrNull()?.id,
             modelRef = modelRef,
             params = params,
